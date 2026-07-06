@@ -1,3 +1,10 @@
+## v1.4.2 (2026-07-06)
+
+### Fix
+
+- **server**: configure FastMCP to disable banner and update checks
+- **docker**: update base image from alpine3.23 to alpine3.24
+
 ## v1.4.1 (2026-06-05)
 
 ### Fix
