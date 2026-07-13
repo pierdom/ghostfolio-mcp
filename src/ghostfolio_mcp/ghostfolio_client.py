@@ -226,11 +226,31 @@ def get_transport_config_from_env() -> TransportConfig:
     if http_bearer_token is not None:
         http_bearer_token = http_bearer_token.strip() or None
 
+    def _csv(name: str) -> list[str] | None:
+        raw = os.getenv(name, "").strip()
+        if not raw:
+            return None
+        return [item.strip() for item in raw.split(",") if item.strip()]
+
+    def _clean(name: str) -> str | None:
+        value = os.getenv(name)
+        return value.strip() or None if value is not None else None
+
     return TransportConfig(
         transport_type=os.getenv("MCP_TRANSPORT", "stdio").lower(),
         http_host=os.getenv("MCP_HTTP_HOST", "127.0.0.1"),
         http_port=int(os.getenv("MCP_HTTP_PORT", "8000")),
         http_bearer_token=http_bearer_token,
+        oidc_config_url=_clean("OIDC_CONFIG_URL"),
+        oidc_client_id=_clean("OIDC_CLIENT_ID"),
+        oidc_client_secret=_clean("OIDC_CLIENT_SECRET"),
+        oidc_base_url=_clean("OIDC_BASE_URL"),
+        oidc_redirect_path=os.getenv("OIDC_REDIRECT_PATH", "/auth/callback"),
+        oidc_required_scopes=_csv("OIDC_REQUIRED_SCOPES"),
+        oidc_allowed_redirect_uris=_csv("OIDC_ALLOWED_REDIRECT_URIS"),
+        oidc_verify_id_token=parse_bool(
+            os.getenv("OIDC_VERIFY_ID_TOKEN"), default=False
+        ),
     )
 
 

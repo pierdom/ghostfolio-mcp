@@ -53,9 +53,29 @@ except Exception as e:
     logger.error(f"Invalid configuration: {e}")
     raise
 
-# Create auth provider if bearer token is configured
+# Create auth provider. Precedence: OIDC (remote OAuth via an upstream IdP such as
+# PocketID) > static bearer token > none. OIDC exposes a DCR-compliant OAuth interface
+# required by Claude's remote connectors (mobile/desktop); the static bearer path is
+# kept for machine-to-machine clients (e.g. Claude Code CLI).
 auth_provider = None
-if getattr(TRANSPORT_CONFIG, "http_bearer_token", None):
+if TRANSPORT_CONFIG.oidc_enabled:
+    from fastmcp.server.auth.oidc_proxy import OIDCProxy
+
+    auth_provider = OIDCProxy(
+        config_url=TRANSPORT_CONFIG.oidc_config_url,
+        client_id=TRANSPORT_CONFIG.oidc_client_id,
+        client_secret=TRANSPORT_CONFIG.oidc_client_secret,
+        base_url=TRANSPORT_CONFIG.oidc_base_url,
+        redirect_path=TRANSPORT_CONFIG.oidc_redirect_path,
+        required_scopes=TRANSPORT_CONFIG.oidc_required_scopes,
+        allowed_client_redirect_uris=TRANSPORT_CONFIG.oidc_allowed_redirect_uris,
+        verify_id_token=TRANSPORT_CONFIG.oidc_verify_id_token,
+    )
+    logger.info(
+        "OIDC auth enabled via OIDCProxy (upstream: %s)",
+        TRANSPORT_CONFIG.oidc_config_url,
+    )
+elif getattr(TRANSPORT_CONFIG, "http_bearer_token", None):
     bearer_token = TRANSPORT_CONFIG.http_bearer_token
     if bearer_token:  # Type narrowing: ensures bearer_token is str, not None
         auth_provider = StaticTokenVerifier(
@@ -145,6 +165,7 @@ def main():
     if (
         TRANSPORT_CONFIG.transport_type in {"sse", "http"}
         and not TRANSPORT_CONFIG.http_bearer_token
+        and not TRANSPORT_CONFIG.oidc_enabled
     ):
         logger.warning(
             "WARNING: MCP_HTTP_BEARER_TOKEN is not set. The MCP server will run WITHOUT authentication. "
