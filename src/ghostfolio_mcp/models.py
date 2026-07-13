@@ -89,6 +89,14 @@ class TransportConfig(BaseModel):
         False,
         description="Verify the id_token instead of the access_token (for IdPs that issue opaque access tokens)",
     )
+    oidc_forward_resource: bool = Field(
+        False,
+        description=(
+            "Forward the RFC 8707 'resource' indicator upstream. Default off: many "
+            "OIDC IdPs (e.g. PocketID) reject it with invalid_request. Enable only for "
+            "IdPs that support resource indicators. Token audience binding is unaffected."
+        ),
+    )
     # Host/Origin request guard (FastMCP DNS-rebinding protection). It allows only
     # localhost by default and 421s a proxied Host header, so it must be relaxed when
     # the server runs behind a reverse proxy. Default (None) = off for HTTP/SSE.

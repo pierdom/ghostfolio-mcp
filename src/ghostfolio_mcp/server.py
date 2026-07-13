@@ -71,6 +71,7 @@ if TRANSPORT_CONFIG.oidc_enabled:
         required_scopes=TRANSPORT_CONFIG.oidc_required_scopes,
         allowed_client_redirect_uris=TRANSPORT_CONFIG.oidc_allowed_redirect_uris,
         verify_id_token=TRANSPORT_CONFIG.oidc_verify_id_token,
+        forward_resource=TRANSPORT_CONFIG.oidc_forward_resource,
     )
     logger.info(
         "OIDC auth enabled via OIDCProxy (upstream: %s)",

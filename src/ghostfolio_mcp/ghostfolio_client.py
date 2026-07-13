@@ -253,6 +253,9 @@ def get_transport_config_from_env() -> TransportConfig:
         oidc_verify_id_token=parse_bool(
             os.getenv("OIDC_VERIFY_ID_TOKEN"), default=False
         ),
+        oidc_forward_resource=parse_bool(
+            os.getenv("OIDC_FORWARD_RESOURCE"), default=False
+        ),
         host_origin_protection=(
             parse_bool(_hop_raw, default=False) if _hop_raw is not None else None
         ),
