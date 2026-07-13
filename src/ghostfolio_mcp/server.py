@@ -9,6 +9,7 @@ import logging
 import os
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -53,9 +54,30 @@ except Exception as e:
     logger.error(f"Invalid configuration: {e}")
     raise
 
-# Create auth provider if bearer token is configured
+# Create auth provider. Precedence: OIDC (remote OAuth via an upstream IdP such as
+# PocketID) > static bearer token > none. OIDC exposes a DCR-compliant OAuth interface
+# required by Claude's remote connectors (mobile/desktop); the static bearer path is
+# kept for machine-to-machine clients (e.g. Claude Code CLI).
 auth_provider = None
-if getattr(TRANSPORT_CONFIG, "http_bearer_token", None):
+if TRANSPORT_CONFIG.oidc_enabled:
+    from fastmcp.server.auth.oidc_proxy import OIDCProxy
+
+    auth_provider = OIDCProxy(
+        config_url=TRANSPORT_CONFIG.oidc_config_url,
+        client_id=TRANSPORT_CONFIG.oidc_client_id,
+        client_secret=TRANSPORT_CONFIG.oidc_client_secret,
+        base_url=TRANSPORT_CONFIG.oidc_base_url,
+        redirect_path=TRANSPORT_CONFIG.oidc_redirect_path,
+        required_scopes=TRANSPORT_CONFIG.oidc_required_scopes,
+        allowed_client_redirect_uris=TRANSPORT_CONFIG.oidc_allowed_redirect_uris,
+        verify_id_token=TRANSPORT_CONFIG.oidc_verify_id_token,
+        forward_resource=TRANSPORT_CONFIG.oidc_forward_resource,
+    )
+    logger.info(
+        "OIDC auth enabled via OIDCProxy (upstream: %s)",
+        TRANSPORT_CONFIG.oidc_config_url,
+    )
+elif getattr(TRANSPORT_CONFIG, "http_bearer_token", None):
     bearer_token = TRANSPORT_CONFIG.http_bearer_token
     if bearer_token:  # Type narrowing: ensures bearer_token is str, not None
         auth_provider = StaticTokenVerifier(
@@ -134,6 +156,48 @@ if getattr(GHOSTFOLIO_CONFIG, "rate_limit_enabled", False):
     )
 
 
+def _http_security_kwargs() -> dict:
+    """Host/Origin guard config for HTTP/SSE transports.
+
+    FastMCP's request guard only allows localhost by default and returns 421 for a
+    proxied Host header (and 403 for a mismatched Origin). Behind a TLS reverse proxy
+    the real controls are TLS + OAuth, so the guard defaults OFF for remote hosting.
+    Set MCP_HOST_ORIGIN_PROTECTION=true to harden: the public host/origin (derived
+    from OIDC_BASE_URL) and Claude's connector origins are then allowed automatically,
+    alongside any MCP_ALLOWED_HOSTS / MCP_ALLOWED_ORIGINS.
+    """
+    hop = TRANSPORT_CONFIG.host_origin_protection
+    if not hop:
+        logger.info(
+            "Host/Origin protection disabled (expected behind a TLS reverse proxy)"
+        )
+        return {"host_origin_protection": False}
+
+    allowed_hosts = list(TRANSPORT_CONFIG.allowed_hosts or [])
+    allowed_origins = list(TRANSPORT_CONFIG.allowed_origins or [])
+    if TRANSPORT_CONFIG.oidc_base_url:
+        parsed = urlsplit(TRANSPORT_CONFIG.oidc_base_url)
+        if parsed.hostname and parsed.hostname not in allowed_hosts:
+            allowed_hosts.append(parsed.hostname)
+        public_origin = f"{parsed.scheme}://{parsed.netloc}"
+        if public_origin not in allowed_origins:
+            allowed_origins.append(public_origin)
+    for claude_origin in ("https://claude.ai", "https://claude.com"):
+        if claude_origin not in allowed_origins:
+            allowed_origins.append(claude_origin)
+
+    logger.info(
+        "Host/Origin protection enabled (hosts=%s, origins=%s)",
+        allowed_hosts,
+        allowed_origins,
+    )
+    return {
+        "host_origin_protection": True,
+        "allowed_hosts": allowed_hosts,
+        "allowed_origins": allowed_origins,
+    }
+
+
 def main():
     # Basic validation
     if not all([GHOSTFOLIO_CONFIG.ghostfolio_url, GHOSTFOLIO_CONFIG.token]):
@@ -145,6 +209,7 @@ def main():
     if (
         TRANSPORT_CONFIG.transport_type in {"sse", "http"}
         and not TRANSPORT_CONFIG.http_bearer_token
+        and not TRANSPORT_CONFIG.oidc_enabled
     ):
         logger.warning(
             "WARNING: MCP_HTTP_BEARER_TOKEN is not set. The MCP server will run WITHOUT authentication. "
@@ -168,6 +233,7 @@ def main():
             transport="sse",
             host=TRANSPORT_CONFIG.http_host,
             port=TRANSPORT_CONFIG.http_port,
+            **_http_security_kwargs(),
         )
     elif TRANSPORT_CONFIG.transport_type == "http":
         logger.info(
@@ -181,6 +247,7 @@ def main():
             transport="http",
             host=TRANSPORT_CONFIG.http_host,
             port=TRANSPORT_CONFIG.http_port,
+            **_http_security_kwargs(),
         )
     else:
         # Default to STDIO transport

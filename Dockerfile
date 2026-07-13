@@ -30,7 +30,9 @@ ENV PYTHONUNBUFFERED=1
 
 RUN apk add --no-cache ca-certificates \
     && addgroup -g 1000 appuser \
-    && adduser -D -u 1000 -G appuser appuser
+    && adduser -D -u 1000 -G appuser appuser \
+    && mkdir -p /data \
+    && chown appuser:appuser /data
 
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 
@@ -39,6 +41,12 @@ WORKDIR /app
 USER appuser
 
 ENV PATH="/app/.venv/bin:$PATH"
+
+# Persist OAuth state (OIDCProxy's encrypted client store, DCR registrations, tokens)
+# across container recreation. FastMCP derives its data dir from platformdirs, which
+# honours XDG_DATA_HOME on Linux. Mount /data as a volume to keep remote sessions alive.
+ENV XDG_DATA_HOME=/data
+VOLUME ["/data"]
 
 HEALTHCHECK \
   --interval=15s \

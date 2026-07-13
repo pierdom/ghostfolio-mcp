@@ -53,3 +53,72 @@ class TransportConfig(BaseModel):
     http_bearer_token: str | None = Field(
         None, description="Bearer token for HTTP authentication"
     )
+    # OIDC / OAuth (remote MCP via an upstream OIDC IdP, e.g. PocketID).
+    # When all of config_url/client_id/client_secret/base_url are set, the server
+    # exposes a DCR-compliant OAuth interface (FastMCP OIDCProxy) brokered to the
+    # upstream IdP, so Claude's remote connectors (mobile/desktop) can authenticate.
+    oidc_config_url: str | None = Field(
+        None,
+        description="Upstream OIDC discovery URL (…/.well-known/openid-configuration)",
+    )
+    oidc_client_id: str | None = Field(
+        None, description="Client ID registered with the upstream IdP"
+    )
+    oidc_client_secret: str | None = Field(
+        None, description="Client secret registered with the upstream IdP"
+    )
+    oidc_base_url: str | None = Field(
+        None,
+        description="Public base URL where this server's OAuth endpoints are reachable",
+    )
+    oidc_redirect_path: str = Field(
+        "/auth/callback",
+        description="Callback path registered on the upstream IdP client",
+    )
+    oidc_required_scopes: list[str] | None = Field(
+        None, description="Scopes required on presented tokens (None = don't enforce)"
+    )
+    oidc_allowed_redirect_uris: list[str] | None = Field(
+        None,
+        description=(
+            "Allowed MCP-client redirect URI patterns (wildcards ok). "
+            "None = OIDCProxy default (registered URIs + loopback variance)"
+        ),
+    )
+    oidc_verify_id_token: bool = Field(
+        False,
+        description="Verify the id_token instead of the access_token (for IdPs that issue opaque access tokens)",
+    )
+    oidc_forward_resource: bool = Field(
+        False,
+        description=(
+            "Forward the RFC 8707 'resource' indicator upstream. Default off: many "
+            "OIDC IdPs (e.g. PocketID) reject it with invalid_request. Enable only for "
+            "IdPs that support resource indicators. Token audience binding is unaffected."
+        ),
+    )
+    # Host/Origin request guard (FastMCP DNS-rebinding protection). It allows only
+    # localhost by default and 421s a proxied Host header, so it must be relaxed when
+    # the server runs behind a reverse proxy. Default (None) = off for HTTP/SSE.
+    host_origin_protection: bool | None = Field(
+        None,
+        description="Validate Host/Origin headers. Default: off for HTTP/SSE (intended behind a TLS reverse proxy); set true to harden.",
+    )
+    allowed_hosts: list[str] | None = Field(
+        None,
+        description="Extra Host header values allowed when host_origin_protection is on",
+    )
+    allowed_origins: list[str] | None = Field(
+        None,
+        description="Extra browser Origins allowed when host_origin_protection is on",
+    )
+
+    @property
+    def oidc_enabled(self) -> bool:
+        """OIDC auth is active only when all upstream credentials are present."""
+        return bool(
+            self.oidc_config_url
+            and self.oidc_client_id
+            and self.oidc_client_secret
+            and self.oidc_base_url
+        )
