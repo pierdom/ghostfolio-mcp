@@ -89,6 +89,21 @@ class TransportConfig(BaseModel):
         False,
         description="Verify the id_token instead of the access_token (for IdPs that issue opaque access tokens)",
     )
+    # Host/Origin request guard (FastMCP DNS-rebinding protection). It allows only
+    # localhost by default and 421s a proxied Host header, so it must be relaxed when
+    # the server runs behind a reverse proxy. Default (None) = off for HTTP/SSE.
+    host_origin_protection: bool | None = Field(
+        None,
+        description="Validate Host/Origin headers. Default: off for HTTP/SSE (intended behind a TLS reverse proxy); set true to harden.",
+    )
+    allowed_hosts: list[str] | None = Field(
+        None,
+        description="Extra Host header values allowed when host_origin_protection is on",
+    )
+    allowed_origins: list[str] | None = Field(
+        None,
+        description="Extra browser Origins allowed when host_origin_protection is on",
+    )
 
     @property
     def oidc_enabled(self) -> bool:

@@ -236,6 +236,8 @@ def get_transport_config_from_env() -> TransportConfig:
         value = os.getenv(name)
         return value.strip() or None if value is not None else None
 
+    _hop_raw = os.getenv("MCP_HOST_ORIGIN_PROTECTION")
+
     return TransportConfig(
         transport_type=os.getenv("MCP_TRANSPORT", "stdio").lower(),
         http_host=os.getenv("MCP_HTTP_HOST", "127.0.0.1"),
@@ -251,6 +253,11 @@ def get_transport_config_from_env() -> TransportConfig:
         oidc_verify_id_token=parse_bool(
             os.getenv("OIDC_VERIFY_ID_TOKEN"), default=False
         ),
+        host_origin_protection=(
+            parse_bool(_hop_raw, default=False) if _hop_raw is not None else None
+        ),
+        allowed_hosts=_csv("MCP_ALLOWED_HOSTS"),
+        allowed_origins=_csv("MCP_ALLOWED_ORIGINS"),
     )
 
 

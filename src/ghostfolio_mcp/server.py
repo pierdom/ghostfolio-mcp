@@ -9,6 +9,7 @@ import logging
 import os
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -154,6 +155,48 @@ if getattr(GHOSTFOLIO_CONFIG, "rate_limit_enabled", False):
     )
 
 
+def _http_security_kwargs() -> dict:
+    """Host/Origin guard config for HTTP/SSE transports.
+
+    FastMCP's request guard only allows localhost by default and returns 421 for a
+    proxied Host header (and 403 for a mismatched Origin). Behind a TLS reverse proxy
+    the real controls are TLS + OAuth, so the guard defaults OFF for remote hosting.
+    Set MCP_HOST_ORIGIN_PROTECTION=true to harden: the public host/origin (derived
+    from OIDC_BASE_URL) and Claude's connector origins are then allowed automatically,
+    alongside any MCP_ALLOWED_HOSTS / MCP_ALLOWED_ORIGINS.
+    """
+    hop = TRANSPORT_CONFIG.host_origin_protection
+    if not hop:
+        logger.info(
+            "Host/Origin protection disabled (expected behind a TLS reverse proxy)"
+        )
+        return {"host_origin_protection": False}
+
+    allowed_hosts = list(TRANSPORT_CONFIG.allowed_hosts or [])
+    allowed_origins = list(TRANSPORT_CONFIG.allowed_origins or [])
+    if TRANSPORT_CONFIG.oidc_base_url:
+        parsed = urlsplit(TRANSPORT_CONFIG.oidc_base_url)
+        if parsed.hostname and parsed.hostname not in allowed_hosts:
+            allowed_hosts.append(parsed.hostname)
+        public_origin = f"{parsed.scheme}://{parsed.netloc}"
+        if public_origin not in allowed_origins:
+            allowed_origins.append(public_origin)
+    for claude_origin in ("https://claude.ai", "https://claude.com"):
+        if claude_origin not in allowed_origins:
+            allowed_origins.append(claude_origin)
+
+    logger.info(
+        "Host/Origin protection enabled (hosts=%s, origins=%s)",
+        allowed_hosts,
+        allowed_origins,
+    )
+    return {
+        "host_origin_protection": True,
+        "allowed_hosts": allowed_hosts,
+        "allowed_origins": allowed_origins,
+    }
+
+
 def main():
     # Basic validation
     if not all([GHOSTFOLIO_CONFIG.ghostfolio_url, GHOSTFOLIO_CONFIG.token]):
@@ -189,6 +232,7 @@ def main():
             transport="sse",
             host=TRANSPORT_CONFIG.http_host,
             port=TRANSPORT_CONFIG.http_port,
+            **_http_security_kwargs(),
         )
     elif TRANSPORT_CONFIG.transport_type == "http":
         logger.info(
@@ -202,6 +246,7 @@ def main():
             transport="http",
             host=TRANSPORT_CONFIG.http_host,
             port=TRANSPORT_CONFIG.http_port,
+            **_http_security_kwargs(),
         )
     else:
         # Default to STDIO transport
