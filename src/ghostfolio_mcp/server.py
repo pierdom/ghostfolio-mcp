@@ -72,7 +72,19 @@ mcp = FastMCP(
     name="Ghostfolio MCP Server",
     version=__version__,
     instructions=(
-        "This MCP server exposes tools for interacting with the Ghostfolio API, supporting both read and write operations if not in read-only mode."
+        "You are an assistant with access to the Ghostfolio MCP Server, exposing tools to "
+        "interact with a Ghostfolio instance for personal finance and portfolio tracking.\n\n"
+        "Available Capabilities:\n"
+        "1. Accounts & Cash: Retrieve, create, update, and delete accounts. You can transfer cash balances between accounts.\n"
+        "2. Activities & Transactions: Add, retrieve, and delete activities (e.g. BUY, SELL, DIVIDEND, INTEREST, FEE, LIABILITY).\n"
+        "3. Watchlist: Manage symbols tracked by the user on their watchlist.\n"
+        "4. Portfolio Analytics: Access details, allocations, holdings, performance charts, and benchmark comparisons.\n"
+        "5. Market Data & Symbols: Look up ticker symbols across data sources (YAHOO, COINGECKO, MANUAL) and get historical prices. "
+        "Note: Profile metadata updates and custom price entries are only supported for the 'MANUAL' data source.\n"
+        "6. Exchange Rates: Get historical currency conversion rates for multi-currency portfolio reporting.\n"
+        "7. Exports & Imports: Run full portfolio backups or fetch structured dividend transactions for import.\n\n"
+        "Guidelines:\n"
+        "- When adding/updating data, ensure ISO-8601 formatting is used for dates (e.g., 'YYYY-MM-DDTHH:MM:SS.sssZ' or 'YYYY-MM-DD')."
     ),
     auth=auth_provider,
 )
