@@ -168,3 +168,152 @@ def register_accounts_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
         """
         async with get_ghostfolio_client(config) as client:
             return await client.delete(f"account/{account_id}")
+
+    @mcp.tool(
+        tags={"account", "read-only"},
+        annotations={
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+        },
+    )
+    async def get_account_details(
+        account_id: Annotated[
+            str,
+            Field(description="Account ID to retrieve details for"),
+        ],
+    ) -> dict[str, Any]:
+        """
+        Get details for a specific account.
+
+        Args:
+            account_id: The unique ID of the account to fetch
+
+        Returns:
+            Dictionary containing the detailed account profile
+        """
+        async with get_ghostfolio_client(config) as client:
+            return await client.get(f"account/{account_id}")
+
+    @mcp.tool(
+        tags={"account", "update"},
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+        },
+    )
+    async def update_account(
+        account_id: Annotated[
+            str,
+            Field(description="Account ID to update"),
+        ],
+        name: Annotated[
+            str | None,
+            Field(default=None, description="Optional new name of the account"),
+        ] = None,
+        currency: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description="Optional new currency code for the account (e.g., 'USD', 'EUR')",
+            ),
+        ] = None,
+        balance: Annotated[
+            float | None,
+            Field(default=None, description="Optional new balance for the account"),
+        ] = None,
+        comment: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description="Optional new comment or note for the account",
+            ),
+        ] = None,
+        platform_id: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description="Optional new platform ID for the account",
+            ),
+        ] = None,
+        is_excluded: Annotated[
+            bool | None,
+            Field(
+                default=None,
+                description="Optional boolean to exclude/include in portfolio calculations",
+            ),
+        ] = None,
+    ) -> dict[str, Any]:
+        """
+        Update settings or details of an existing account.
+
+        Args:
+            account_id: The unique ID of the account to update
+            name: Optional new account name
+            currency: Optional new account currency
+            balance: Optional new cash balance
+            comment: Optional new note/comment
+            platform_id: Optional new platform ID
+            is_excluded: Optional new calculation exclusion boolean
+
+        Returns:
+            Dictionary containing the updated account status
+        """
+        async with get_ghostfolio_client(config) as client:
+            account_data: dict[str, Any] = {}
+            if name is not None:
+                account_data["name"] = name
+            if currency is not None:
+                account_data["currency"] = currency
+            if balance is not None:
+                account_data["balance"] = balance
+            if comment is not None:
+                account_data["comment"] = comment
+            if is_excluded is not None:
+                account_data["isExcluded"] = is_excluded
+            if platform_id is not None:
+                account_data["platformId"] = platform_id
+
+            return await client.put(f"account/{account_id}", data=account_data)
+
+    @mcp.tool(
+        tags={"account", "transfer"},
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+        },
+    )
+    async def transfer_account_balance(
+        account_id_from: Annotated[
+            str,
+            Field(description="The source account ID to transfer cash from"),
+        ],
+        account_id_to: Annotated[
+            str,
+            Field(description="The target account ID to transfer cash to"),
+        ],
+        balance: Annotated[
+            float,
+            Field(description="The amount of cash to transfer"),
+        ],
+    ) -> dict[str, Any]:
+        """
+        Transfer cash balances between two accounts.
+
+        Args:
+            account_id_from: Source account ID
+            account_id_to: Target account ID
+            balance: Amount to transfer
+
+        Returns:
+            Dictionary containing the status/result of the transfer.
+        """
+        async with get_ghostfolio_client(config) as client:
+            payload = {
+                "accountIdFrom": account_id_from,
+                "accountIdTo": account_id_to,
+                "balance": balance,
+            }
+            return await client.post("account/transfer-balance", data=payload)

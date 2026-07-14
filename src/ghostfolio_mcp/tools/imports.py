@@ -45,3 +45,36 @@ def register_imports_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
         """
         async with get_ghostfolio_client(config) as client:
             return await client.post("import", data=data)
+
+    @mcp.tool(
+        tags={"import", "read-only"},
+        annotations={
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+        },
+    )
+    async def get_dividends_for_import(
+        data_source: Annotated[
+            str,
+            Field(
+                description="Data source for the symbol (e.g. 'YAHOO', 'COINGECKO', 'MANUAL')"
+            ),
+        ],
+        symbol: Annotated[
+            str,
+            Field(description="Symbol/ticker of the asset to get dividends for"),
+        ],
+    ) -> dict[str, Any]:
+        """
+        Fetch historical dividend data formatted for import for a specific symbol.
+
+        Args:
+            data_source: Data source (e.g. 'YAHOO', 'COINGECKO')
+            symbol: Symbol/ticker of the asset
+
+        Returns:
+            Dictionary containing list of dividend transactions formatted for import.
+        """
+        async with get_ghostfolio_client(config) as client:
+            return await client.get(f"import/dividends/{data_source}/{symbol}")
