@@ -20,8 +20,8 @@ from fastmcp.server.transforms.search import RegexSearchTransform
 
 from ghostfolio_mcp.ghostfolio_client import get_ghostfolio_config_from_env
 from ghostfolio_mcp.ghostfolio_client import get_transport_config_from_env
-from ghostfolio_mcp.ghostfolio_tools import register_tools
 from ghostfolio_mcp.sentry_init import init_sentry
+from ghostfolio_mcp.tools import register_tools
 
 # Load environment variables
 load_dotenv()
