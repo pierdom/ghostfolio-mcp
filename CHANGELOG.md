@@ -1,3 +1,14 @@
+## v1.5.0 (2026-07-14)
+
+### Feat
+
+- **tools**: add watchlist, exchange-rates, export, benchmarks, and cash account tools
+
+### Refactor
+
+- **server**: improve server instructions in FastMCP initialization
+- **tools**: split monolithic tools file into separate resource modules
+
 ## v1.4.3 (2026-07-06)
 
 ### Refactor
