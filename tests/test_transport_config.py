@@ -15,6 +15,9 @@ TRANSPORT_ENV_VARS = (
     "MCP_HTTP_HOST",
     "MCP_HTTP_PORT",
     "MCP_HTTP_BEARER_TOKEN",
+    "MCP_HOST_ORIGIN_PROTECTION",
+    "MCP_ALLOWED_HOSTS",
+    "MCP_ALLOWED_ORIGINS",
     "OIDC_CONFIG_URL",
     "OIDC_CLIENT_ID",
     "OIDC_CLIENT_SECRET",
@@ -38,6 +41,7 @@ def test_defaults_disable_oidc_and_leave_guard_unset():
     config = get_transport_config_from_env()
 
     assert config.oidc_enabled is False
+    assert config.host_origin_protection is None
     assert config.oidc_redirect_path == "/auth/callback"
     assert config.oidc_forward_resource is False
     assert config.oidc_verify_id_token is False
@@ -75,12 +79,37 @@ def test_blank_oidc_values_count_as_unset(monkeypatch):
     assert config.oidc_config_url is None
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("true", True),
+        ("1", True),
+        ("false", False),
+        ("no", False),
+    ],
+)
+def test_host_origin_protection_is_parsed(monkeypatch, value, expected):
+    monkeypatch.setenv("MCP_HOST_ORIGIN_PROTECTION", value)
+
+    assert get_transport_config_from_env().host_origin_protection is expected
+
+
+# Blank means unset, so FastMCP's own default is left alone.
+@pytest.mark.parametrize("value", ["", "   "])
+def test_blank_host_origin_protection_stays_unset(monkeypatch, value):
+    monkeypatch.setenv("MCP_HOST_ORIGIN_PROTECTION", value)
+
+    assert get_transport_config_from_env().host_origin_protection is None
+
+
 def test_comma_separated_values_are_split_and_stripped(monkeypatch):
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", " a.example.com , b.example.com ")
     monkeypatch.setenv("OIDC_REQUIRED_SCOPES", " openid , profile ")
     monkeypatch.setenv("OIDC_ALLOWED_REDIRECT_URIS", "https://example.com/*")
 
     config = get_transport_config_from_env()
 
+    assert config.allowed_hosts == ["a.example.com", "b.example.com"]
     assert config.oidc_required_scopes == ["openid", "profile"]
     assert config.oidc_allowed_redirect_uris == ["https://example.com/*"]
 

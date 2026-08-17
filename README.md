@@ -203,6 +203,11 @@ MCP_TRANSPORT=stdio
 # OIDC_ALLOWED_REDIRECT_URIS=
 # OIDC_VERIFY_ID_TOKEN=false
 # OIDC_FORWARD_RESOURCE=false
+
+# Host/Origin Guard (optional, HTTP/SSE only)
+# MCP_HOST_ORIGIN_PROTECTION=true
+# MCP_ALLOWED_HOSTS=
+# MCP_ALLOWED_ORIGINS=
 ```
 
 ### Sentry Error Tracking & Monitoring (Optional)
@@ -533,6 +538,20 @@ docker run -v ghostfolio-mcp-data:/data --env-file .env ghcr.io/mhajder/ghostfol
 #### Running behind a reverse proxy
 
 `OIDC_BASE_URL` must be the externally reachable HTTPS URL, and the proxy must forward the `Host` header unchanged, otherwise the OAuth metadata this server advertises will point at the wrong host.
+
+### Host/Origin Guard (Optional)
+
+FastMCP can validate the `Host` and `Origin` headers of incoming HTTP requests as a defence against DNS rebinding. `MCP_HOST_ORIGIN_PROTECTION` is unset by default, which leaves FastMCP's own default in place.
+
+```env
+MCP_HOST_ORIGIN_PROTECTION=true
+
+# Extra values, comma-separated. The host and origin implied by OIDC_BASE_URL are allowed automatically.
+MCP_ALLOWED_HOSTS=extra.example.com
+MCP_ALLOWED_ORIGINS=https://app.example.com
+```
+
+Only loopback hosts are accepted out of the box, so behind a reverse proxy the public hostname must be allowed, otherwise every request is answered with `421 Misdirected Request`. Setting `OIDC_BASE_URL` covers that automatically; add anything else, such as a browser client's origin, to the two lists above.
 
 ## Data Sources
 

@@ -2,6 +2,7 @@ import pytest
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
 from ghostfolio_mcp.auth import build_auth_provider
+from ghostfolio_mcp.auth import http_security_kwargs
 from ghostfolio_mcp.models import TransportConfig
 
 OIDC_SETTINGS = {
@@ -108,3 +109,78 @@ def test_oidc_defaults_are_conservative():
     assert provider.kwargs["forward_resource"] is False
     assert provider.kwargs["verify_id_token"] is False
     assert provider.kwargs["redirect_path"] == "/auth/callback"
+
+
+# An unset guard must leave FastMCP's own default in place.
+def test_http_security_kwargs_untouched_when_unset():
+    assert http_security_kwargs(TransportConfig()) == {}
+
+
+def test_http_security_kwargs_explicit_opt_out():
+    config = TransportConfig(host_origin_protection=False)
+
+    assert http_security_kwargs(config) == {"host_origin_protection": False}
+
+
+def test_http_security_kwargs_allows_public_host_from_oidc_base_url():
+    config = TransportConfig(host_origin_protection=True, **OIDC_SETTINGS)
+
+    kwargs = http_security_kwargs(config)
+
+    assert kwargs["host_origin_protection"] is True
+    assert kwargs["allowed_hosts"] == ["mcp.example.com"]
+    assert kwargs["allowed_origins"] == ["https://mcp.example.com"]
+
+
+def test_http_security_kwargs_keeps_non_default_port_in_origin():
+    config = TransportConfig(
+        host_origin_protection=True,
+        **{**OIDC_SETTINGS, "oidc_base_url": "https://mcp.example.com:8443"},
+    )
+
+    kwargs = http_security_kwargs(config)
+
+    assert kwargs["allowed_hosts"] == ["mcp.example.com"]
+    assert kwargs["allowed_origins"] == ["https://mcp.example.com:8443"]
+
+
+def test_http_security_kwargs_merges_configured_entries():
+    config = TransportConfig(
+        host_origin_protection=True,
+        allowed_hosts=["extra.example.com"],
+        allowed_origins=["https://app.example.com"],
+        **OIDC_SETTINGS,
+    )
+
+    kwargs = http_security_kwargs(config)
+
+    assert kwargs["allowed_hosts"] == ["extra.example.com", "mcp.example.com"]
+    assert kwargs["allowed_origins"] == [
+        "https://app.example.com",
+        "https://mcp.example.com",
+    ]
+
+
+def test_http_security_kwargs_does_not_duplicate_configured_entries():
+    config = TransportConfig(
+        host_origin_protection=True,
+        allowed_hosts=["mcp.example.com"],
+        allowed_origins=["https://mcp.example.com"],
+        **OIDC_SETTINGS,
+    )
+
+    kwargs = http_security_kwargs(config)
+
+    assert kwargs["allowed_hosts"] == ["mcp.example.com"]
+    assert kwargs["allowed_origins"] == ["https://mcp.example.com"]
+
+
+# Empty lists would read as a deliberately empty allow-list to FastMCP.
+def test_http_security_kwargs_without_oidc_passes_none_lists():
+    kwargs = http_security_kwargs(TransportConfig(host_origin_protection=True))
+
+    assert kwargs == {
+        "host_origin_protection": True,
+        "allowed_hosts": None,
+        "allowed_origins": None,
+    }

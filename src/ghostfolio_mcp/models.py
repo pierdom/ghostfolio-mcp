@@ -101,6 +101,23 @@ class TransportConfig(BaseModel):
             "invalid_request. Token audience binding is unaffected."
         ),
     )
+    # Host/Origin request guard (FastMCP's DNS-rebinding protection). None leaves
+    # FastMCP's own default in place; setting it explicitly overrides that default.
+    host_origin_protection: bool | None = Field(
+        None,
+        description=(
+            "Validate Host and Origin headers on HTTP/SSE transports. "
+            "None = leave FastMCP's default in place"
+        ),
+    )
+    allowed_hosts: list[str] | None = Field(
+        None,
+        description="Extra Host header values accepted when host_origin_protection is on",
+    )
+    allowed_origins: list[str] | None = Field(
+        None,
+        description="Extra browser Origins accepted when host_origin_protection is on",
+    )
 
     def missing_oidc_settings(self) -> list[str]:
         """Names of OIDC settings that are needed but absent.

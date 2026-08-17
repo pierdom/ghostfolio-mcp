@@ -18,6 +18,7 @@ from fastmcp.server.transforms.search import BM25SearchTransform
 from fastmcp.server.transforms.search import RegexSearchTransform
 
 from ghostfolio_mcp.auth import build_auth_provider
+from ghostfolio_mcp.auth import http_security_kwargs
 from ghostfolio_mcp.ghostfolio_client import get_ghostfolio_config_from_env
 from ghostfolio_mcp.ghostfolio_client import get_transport_config_from_env
 from ghostfolio_mcp.sentry_init import init_sentry
@@ -181,6 +182,7 @@ def main():
             transport="sse",
             host=TRANSPORT_CONFIG.http_host,
             port=TRANSPORT_CONFIG.http_port,
+            **http_security_kwargs(TRANSPORT_CONFIG),
         )
     elif TRANSPORT_CONFIG.transport_type == "http":
         logger.info(
@@ -196,6 +198,7 @@ def main():
             transport="http",
             host=TRANSPORT_CONFIG.http_host,
             port=TRANSPORT_CONFIG.http_port,
+            **http_security_kwargs(TRANSPORT_CONFIG),
         )
     else:
         # Default to STDIO transport

@@ -241,6 +241,9 @@ def get_transport_config_from_env() -> TransportConfig:
             return None
         return [item.strip() for item in raw.split(",") if item.strip()] or None
 
+    # Left as None when unset so FastMCP's own Host/Origin default stays in place.
+    host_origin_protection = _clean("MCP_HOST_ORIGIN_PROTECTION")
+
     return TransportConfig(
         transport_type=os.getenv("MCP_TRANSPORT", "stdio").lower(),
         http_host=os.getenv("MCP_HTTP_HOST", "127.0.0.1"),
@@ -259,6 +262,13 @@ def get_transport_config_from_env() -> TransportConfig:
         oidc_forward_resource=parse_bool(
             os.getenv("OIDC_FORWARD_RESOURCE"), default=False
         ),
+        host_origin_protection=(
+            parse_bool(host_origin_protection, default=False)
+            if host_origin_protection is not None
+            else None
+        ),
+        allowed_hosts=_csv("MCP_ALLOWED_HOSTS"),
+        allowed_origins=_csv("MCP_ALLOWED_ORIGINS"),
     )
 
 
