@@ -42,11 +42,8 @@ USER appuser
 
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Persist OAuth state (OIDCProxy's encrypted client store, DCR registrations, tokens)
-# across container recreation. FastMCP derives its data dir from platformdirs, which
-# honours XDG_DATA_HOME on Linux. Mount /data as a volume to keep remote sessions alive.
-ENV XDG_DATA_HOME=/data
-VOLUME ["/data"]
+# OAuth state for OIDC; mount a volume on /data to persist it
+ENV FASTMCP_HOME=/data
 
 HEALTHCHECK \
   --interval=15s \

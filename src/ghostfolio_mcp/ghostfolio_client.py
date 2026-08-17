@@ -227,17 +227,22 @@ def get_transport_config_from_env() -> TransportConfig:
     if http_bearer_token is not None:
         http_bearer_token = http_bearer_token.strip() or None
 
-    def _csv(name: str) -> list[str] | None:
-        raw = os.getenv(name, "").strip()
-        if not raw:
-            return None
-        return [item.strip() for item in raw.split(",") if item.strip()]
-
     def _clean(name: str) -> str | None:
+        """Read an env var, treating a blank value as unset."""
         value = os.getenv(name)
-        return value.strip() or None if value is not None else None
+        if value is None:
+            return None
+        return value.strip() or None
 
-    _hop_raw = os.getenv("MCP_HOST_ORIGIN_PROTECTION")
+    def _csv(name: str) -> list[str] | None:
+        """Read a comma-separated env var, treating a blank value as unset."""
+        raw = _clean(name)
+        if raw is None:
+            return None
+        return [item.strip() for item in raw.split(",") if item.strip()] or None
+
+    # Left as None when unset so FastMCP's own Host/Origin default stays in place.
+    host_origin_protection = _clean("MCP_HOST_ORIGIN_PROTECTION")
 
     return TransportConfig(
         transport_type=os.getenv("MCP_TRANSPORT", "stdio").lower(),
@@ -258,7 +263,9 @@ def get_transport_config_from_env() -> TransportConfig:
             os.getenv("OIDC_FORWARD_RESOURCE"), default=False
         ),
         host_origin_protection=(
-            parse_bool(_hop_raw, default=False) if _hop_raw is not None else None
+            parse_bool(host_origin_protection, default=False)
+            if host_origin_protection is not None
+            else None
         ),
         allowed_hosts=_csv("MCP_ALLOWED_HOSTS"),
         allowed_origins=_csv("MCP_ALLOWED_ORIGINS"),

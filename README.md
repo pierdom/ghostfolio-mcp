@@ -33,6 +33,7 @@ Ghostfolio MCP Server is a Python-based Model Context Protocol (MCP) server desi
 - SSL/TLS support and configurable timeouts
 - Extensible with custom middlewares and tag-based tool filtering
 - Optional tool-search transform for large tool catalogs
+- Bearer token or OIDC/OAuth authentication for HTTP transports
 
 ## Installation
 
@@ -189,6 +190,24 @@ MCP_TRANSPORT=stdio
 # MCP_HTTP_PORT=8000
 # Optional bearer token for authentication (leave empty for no auth)
 # MCP_HTTP_BEARER_TOKEN=
+
+# OIDC / OAuth Authentication (optional, for remote hosting)
+# Set all four to enable; takes precedence over MCP_HTTP_BEARER_TOKEN
+# OIDC_CONFIG_URL=https://id.example.com/.well-known/openid-configuration
+# OIDC_CLIENT_ID=
+# OIDC_CLIENT_SECRET=
+# OIDC_BASE_URL=https://ghostfolio-mcp.example.com
+# Optional OIDC settings
+# OIDC_REDIRECT_PATH=/auth/callback
+# OIDC_REQUIRED_SCOPES=
+# OIDC_ALLOWED_REDIRECT_URIS=
+# OIDC_VERIFY_ID_TOKEN=false
+# OIDC_FORWARD_RESOURCE=false
+
+# Host/Origin Guard (optional, HTTP/SSE only)
+# MCP_HOST_ORIGIN_PROTECTION=true
+# MCP_ALLOWED_HOSTS=
+# MCP_ALLOWED_ORIGINS=
 ```
 
 ### Sentry Error Tracking & Monitoring (Optional)
@@ -455,6 +474,85 @@ curl -H "Authorization: Bearer your-secret-token" \
 
 **Note**: The HTTP transport requires proper JSON-RPC formatting with `jsonrpc` and `id` fields. The server may also require session initialization for some operations.
 
+### OIDC / OAuth Authentication (Optional)
+
+A static bearer token is enough for machine-to-machine clients, but many MCP clients can only authenticate over OAuth with Dynamic Client Registration. For those, the server can act as an OAuth interface in front of an existing OIDC identity provider (Authentik, Keycloak, PocketID, Auth0, Entra ID, ...) using FastMCP's `OIDCProxy`. Clients register and authenticate against this server; the server brokers the flow upstream. No Ghostfolio credential ever reaches the client.
+
+This applies to the `sse` and `http` transports only.
+
+#### Registering the client
+
+Create a **confidential** client (client ID + secret) on your identity provider with the redirect URI set to `OIDC_BASE_URL` + `OIDC_REDIRECT_PATH`, for example `https://ghostfolio-mcp.example.com/auth/callback`.
+
+#### Configuration
+
+```env
+MCP_TRANSPORT=http
+MCP_HTTP_HOST=0.0.0.0
+MCP_HTTP_PORT=8000
+
+# All four are required to enable OIDC
+OIDC_CONFIG_URL=https://id.example.com/.well-known/openid-configuration
+OIDC_CLIENT_ID=your-client-id
+OIDC_CLIENT_SECRET=your-client-secret
+# Public URL where this server is reachable, used to build its OAuth endpoints.
+# Must be HTTPS (except on localhost), as required for an OAuth issuer.
+OIDC_BASE_URL=https://ghostfolio-mcp.example.com
+```
+
+OIDC is entirely optional. Leaving these unset keeps the existing behaviour, and a partially configured setup is ignored with a warning rather than half-enabled. When OIDC is configured it takes precedence over `MCP_HTTP_BEARER_TOKEN`.
+
+Optional settings:
+
+```env
+# Callback path registered on the identity provider (default: /auth/callback)
+OIDC_REDIRECT_PATH=/auth/callback
+
+# Comma-separated scopes required on presented tokens
+OIDC_REQUIRED_SCOPES=openid,profile
+
+# Comma-separated allowed client redirect URI patterns (wildcards accepted)
+OIDC_ALLOWED_REDIRECT_URIS=https://example.com/*
+
+# Verify the id_token instead of the access token (default: false)
+OIDC_VERIFY_ID_TOKEN=false
+
+# Forward the RFC 8707 'resource' indicator upstream (default: false)
+OIDC_FORWARD_RESOURCE=false
+```
+
+`OIDC_ALLOWED_REDIRECT_URIS` restricts which clients may complete the flow. Leaving it unset accepts any redirect URI a client registers, so set it to the hosts you expect, for example `https://example.com/*`.
+
+Set `OIDC_VERIFY_ID_TOKEN=true` if your identity provider issues opaque (non-JWT) access tokens; the `id_token` is then verified instead.
+
+`OIDC_FORWARD_RESOURCE` is off by default because identity providers that do not implement RFC 8707 resource indicators reject the authorization request with `invalid_request`, which breaks login immediately after consent. Turn it on only if your provider supports resource indicators. Token audience binding is unaffected either way.
+
+#### Persisting OAuth state
+
+Client registrations and encrypted tokens are stored on disk, under FastMCP's data directory. If that directory is not persistent, every restart forces all clients to register and authenticate again. The Docker image sets `FASTMCP_HOME=/data`, so mount a volume there:
+
+```sh
+docker run -v ghostfolio-mcp-data:/data --env-file .env ghcr.io/mhajder/ghostfolio-mcp:latest
+```
+
+#### Running behind a reverse proxy
+
+`OIDC_BASE_URL` must be the externally reachable HTTPS URL, and the proxy must forward the `Host` header unchanged, otherwise the OAuth metadata this server advertises will point at the wrong host.
+
+### Host/Origin Guard (Optional)
+
+FastMCP can validate the `Host` and `Origin` headers of incoming HTTP requests as a defence against DNS rebinding. `MCP_HOST_ORIGIN_PROTECTION` is unset by default, which leaves FastMCP's own default in place.
+
+```env
+MCP_HOST_ORIGIN_PROTECTION=true
+
+# Extra values, comma-separated. The host and origin implied by OIDC_BASE_URL are allowed automatically.
+MCP_ALLOWED_HOSTS=extra.example.com
+MCP_ALLOWED_ORIGINS=https://app.example.com
+```
+
+Only loopback hosts are accepted out of the box, so behind a reverse proxy the public hostname must be allowed, otherwise every request is answered with `421 Misdirected Request`. Setting `OIDC_BASE_URL` covers that automatically; add anything else, such as a browser client's origin, to the two lists above.
+
 ## Data Sources
 
 Ghostfolio supports multiple data sources for market data and symbols:
@@ -477,6 +575,8 @@ docker pull ghcr.io/mhajder/ghostfolio-mcp:latest
 # MCPO image for usage with Open WebUI
 docker pull ghcr.io/mhajder/ghostfolio-mcpo:latest
 ```
+
+When [OIDC authentication](#oidc--oauth-authentication-optional) is enabled, mount a volume on `/data` so OAuth client registrations survive container recreation.
 
 ## Contributing
 
