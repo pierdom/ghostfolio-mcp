@@ -1,11 +1,13 @@
-"""Authentication provider selection for the MCP server.
+"""Authentication and HTTP request-guard configuration for the MCP server.
 
-Kept separate from server.py so the decision here is a pure function of the
+Kept separate from server.py so the policy decisions here (which auth provider
+to build, whether to harden the Host/Origin guard) are pure functions of the
 transport config and can be tested without importing the server module.
 """
 
 import logging
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
@@ -68,3 +70,51 @@ def build_auth_provider(config: TransportConfig) -> Any | None:
         )
 
     return None
+
+
+def http_security_kwargs(config: TransportConfig) -> dict[str, Any]:
+    """Host/Origin guard arguments for mcp.run() on HTTP/SSE transports.
+
+    FastMCP validates the Host and Origin headers to defend against DNS
+    rebinding. Its own default is left untouched unless
+    MCP_HOST_ORIGIN_PROTECTION is set explicitly, so this returns an empty
+    mapping when the setting is unset.
+
+    When hardening is enabled, only loopback hosts are accepted out of the box,
+    which rejects a reverse-proxied Host header with 421. The public host and
+    origin implied by OIDC_BASE_URL are therefore allowed automatically,
+    alongside anything listed in MCP_ALLOWED_HOSTS / MCP_ALLOWED_ORIGINS.
+    """
+    if config.host_origin_protection is None:
+        return {}
+
+    if not config.host_origin_protection:
+        logger.info(
+            "Host/Origin protection explicitly disabled - only do this behind a "
+            "trusted reverse proxy that terminates TLS"
+        )
+        return {"host_origin_protection": False}
+
+    allowed_hosts = list(config.allowed_hosts or [])
+    allowed_origins = list(config.allowed_origins or [])
+
+    if config.oidc_base_url:
+        parsed = urlsplit(config.oidc_base_url)
+        if parsed.hostname and parsed.hostname not in allowed_hosts:
+            allowed_hosts.append(parsed.hostname)
+        public_origin = f"{parsed.scheme}://{parsed.netloc}"
+        if public_origin not in allowed_origins:
+            allowed_origins.append(public_origin)
+
+    logger.info(
+        "Host/Origin protection enabled (allowed_hosts=%s, allowed_origins=%s)",
+        allowed_hosts,
+        allowed_origins,
+    )
+    # Empty lists are passed as None so FastMCP's own defaults still apply; an
+    # explicit empty list would be read as "the allow-list is deliberately empty".
+    return {
+        "host_origin_protection": True,
+        "allowed_hosts": allowed_hosts or None,
+        "allowed_origins": allowed_origins or None,
+    }
