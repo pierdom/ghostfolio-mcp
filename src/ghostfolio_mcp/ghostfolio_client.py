@@ -227,11 +227,38 @@ def get_transport_config_from_env() -> TransportConfig:
     if http_bearer_token is not None:
         http_bearer_token = http_bearer_token.strip() or None
 
+    def _clean(name: str) -> str | None:
+        """Read an env var, treating a blank value as unset."""
+        value = os.getenv(name)
+        if value is None:
+            return None
+        return value.strip() or None
+
+    def _csv(name: str) -> list[str] | None:
+        """Read a comma-separated env var, treating a blank value as unset."""
+        raw = _clean(name)
+        if raw is None:
+            return None
+        return [item.strip() for item in raw.split(",") if item.strip()] or None
+
     return TransportConfig(
         transport_type=os.getenv("MCP_TRANSPORT", "stdio").lower(),
         http_host=os.getenv("MCP_HTTP_HOST", "127.0.0.1"),
         http_port=int(os.getenv("MCP_HTTP_PORT", "8000")),
         http_bearer_token=http_bearer_token,
+        oidc_config_url=_clean("OIDC_CONFIG_URL"),
+        oidc_client_id=_clean("OIDC_CLIENT_ID"),
+        oidc_client_secret=_clean("OIDC_CLIENT_SECRET"),
+        oidc_base_url=_clean("OIDC_BASE_URL"),
+        oidc_redirect_path=_clean("OIDC_REDIRECT_PATH") or "/auth/callback",
+        oidc_required_scopes=_csv("OIDC_REQUIRED_SCOPES"),
+        oidc_allowed_redirect_uris=_csv("OIDC_ALLOWED_REDIRECT_URIS"),
+        oidc_verify_id_token=parse_bool(
+            os.getenv("OIDC_VERIFY_ID_TOKEN"), default=False
+        ),
+        oidc_forward_resource=parse_bool(
+            os.getenv("OIDC_FORWARD_RESOURCE"), default=False
+        ),
     )
 
 

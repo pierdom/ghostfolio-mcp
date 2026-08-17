@@ -30,7 +30,9 @@ ENV PYTHONUNBUFFERED=1
 
 RUN apk add --no-cache ca-certificates \
     && addgroup -g 1000 appuser \
-    && adduser -D -u 1000 -G appuser appuser
+    && adduser -D -u 1000 -G appuser appuser \
+    && mkdir -p /data \
+    && chown appuser:appuser /data
 
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 
@@ -39,6 +41,9 @@ WORKDIR /app
 USER appuser
 
 ENV PATH="/app/.venv/bin:$PATH"
+
+# OAuth state for OIDC; mount a volume on /data to persist it
+ENV FASTMCP_HOME=/data
 
 HEALTHCHECK \
   --interval=15s \
