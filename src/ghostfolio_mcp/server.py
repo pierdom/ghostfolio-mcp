@@ -13,11 +13,11 @@ from importlib.metadata import version
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp import settings
-from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastmcp.server.middleware.rate_limiting import SlidingWindowRateLimitingMiddleware
 from fastmcp.server.transforms.search import BM25SearchTransform
 from fastmcp.server.transforms.search import RegexSearchTransform
 
+from ghostfolio_mcp.auth import build_auth_provider
 from ghostfolio_mcp.ghostfolio_client import get_ghostfolio_config_from_env
 from ghostfolio_mcp.ghostfolio_client import get_transport_config_from_env
 from ghostfolio_mcp.sentry_init import init_sentry
@@ -63,19 +63,7 @@ except Exception as e:
     logger.error(f"Invalid configuration: {e}")
     raise
 
-# Create auth provider if bearer token is configured
-auth_provider = None
-if getattr(TRANSPORT_CONFIG, "http_bearer_token", None):
-    bearer_token = TRANSPORT_CONFIG.http_bearer_token
-    if bearer_token:  # Type narrowing: ensures bearer_token is str, not None
-        auth_provider = StaticTokenVerifier(
-            tokens={
-                bearer_token: {
-                    "client_id": "authenticated-client",
-                    "scopes": ["read", "write"],
-                }
-            }
-        )
+auth_provider = build_auth_provider(TRANSPORT_CONFIG)
 
 # Initialize FastMCP server
 mcp = FastMCP(
@@ -167,6 +155,7 @@ def main():
     if (
         TRANSPORT_CONFIG.transport_type in {"sse", "http"}
         and not TRANSPORT_CONFIG.http_bearer_token
+        and not TRANSPORT_CONFIG.oidc_enabled
     ):
         logger.warning(
             "WARNING: MCP_HTTP_BEARER_TOKEN is not set. The MCP server will run WITHOUT authentication. "
@@ -182,7 +171,9 @@ def main():
         logger.info(
             f"Using HTTP SSE transport on {TRANSPORT_CONFIG.http_host}:{TRANSPORT_CONFIG.http_port}"
         )
-        if TRANSPORT_CONFIG.http_bearer_token:
+        if TRANSPORT_CONFIG.oidc_enabled:
+            logger.info("OIDC authentication enabled for SSE transport")
+        elif TRANSPORT_CONFIG.http_bearer_token:
             logger.info("Bearer token authentication enabled for SSE transport")
 
         # Run with HTTP SSE transport
@@ -195,7 +186,9 @@ def main():
         logger.info(
             f"Using HTTP Streamable transport on {TRANSPORT_CONFIG.http_host}:{TRANSPORT_CONFIG.http_port}"
         )
-        if TRANSPORT_CONFIG.http_bearer_token:
+        if TRANSPORT_CONFIG.oidc_enabled:
+            logger.info("OIDC authentication enabled for Streamable transport")
+        elif TRANSPORT_CONFIG.http_bearer_token:
             logger.info("Bearer token authentication enabled for Streamable transport")
 
         # Run with HTTP Streamable transport
