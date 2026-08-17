@@ -264,6 +264,9 @@ Sentry is completely optional. If you don't set `SENTRY_DSN`, the server will ru
 - `get_account_balances`: Get account balances for a specific account
 - `create_account`: Create a new account in your portfolio
 - `delete_account`: Delete an existing account from your portfolio (destructive operation)
+- `get_account_details`: Get details for a specific account
+- `update_account`: Update settings or details of an existing account
+- `transfer_account_balance`: Transfer cash balances between two accounts
 
 ### Portfolio & Transaction Management Tools
 
@@ -276,6 +279,25 @@ Sentry is completely optional. If you don't set `SENTRY_DSN`, the server will ru
 - `get_orders`: Get all activities/orders from your portfolio, optionally filtered by account
 - `create_activity`: Create a single new transaction/activity in your portfolio (BUY, SELL, DIVIDEND, INTEREST, FEE, etc.)
 - `delete_activity`: Delete a single activity/transaction by its ID (destructive operation)
+
+### Benchmark Tools
+
+- `get_benchmarks`: Get all configured benchmarks
+- `get_benchmark_performance`: Compare portfolio performance against a benchmark symbol starting from a specific date
+
+### Watchlist Tools
+
+- `get_watchlist`: Get all items in the user's watchlist
+- `add_to_watchlist`: Add a symbol to the user's watchlist
+- `remove_from_watchlist`: Remove a symbol from the user's watchlist
+
+### Exchange Rate Tools
+
+- `get_exchange_rate`: Get the exchange rate for a given currency symbol on a specific date
+
+### Data Export Tools
+
+- `export_portfolio`: Export portfolio activities/transactions data as JSON
 
 ### Market Data & Symbol Tools
 
@@ -291,6 +313,7 @@ Sentry is completely optional. If you don't set `SENTRY_DSN`, the server will ru
 ### Data Import Tools
 
 - `import_transactions`: Import transactions into your portfolio (bulk import operation)
+- `get_dividends_for_import`: Fetch historical dividend data formatted for import for a specific symbol
 
 ### System & Platform Tools
 
@@ -322,7 +345,7 @@ GHOSTFOLIO_DISABLED_TAGS=portfolio,symbol,import
 ```
 
 Available tags include:
-- `account` - Account management tools (create, delete, get accounts)
+- `account` - Account management tools (create, delete, update, get accounts)
 - `portfolio` - Portfolio analysis and performance tools
 - `symbol` - Symbol lookup and data tools
 - `import` - Data import tools
@@ -330,6 +353,10 @@ Available tags include:
 - `user` - User information tools
 - `system` - System health and platform information tools
 - `activities` - Activity/transaction management tools (create, delete activities)
+- `watchlist` - Watchlist management tools
+- `exchange-rate` - Currency exchange rate tools
+- `export` - Data export tools
+- `benchmark` - Benchmark tools
 
 ### Rate Limiting
 

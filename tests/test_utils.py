@@ -4,7 +4,7 @@ from ghostfolio_mcp.utils import parse_bool
 
 
 @pytest.mark.parametrize(
-    "val,default,expected",
+    ("val", "default", "expected"),
     [
         (None, True, True),
         (None, False, False),
@@ -19,11 +19,13 @@ from ghostfolio_mcp.utils import parse_bool
         ("0", True, False),
         ("false", True, False),
         ("no", True, False),
-        ("off", True, False),
-        ("", True, False),
         ("random", True, False),
-        ("  ", True, False),
         ("False", True, False),
+        # Blank means "unset", so the default wins rather than False.
+        ("", True, True),
+        ("", False, False),
+        ("  ", True, True),
+        ("  ", False, False),
     ],
 )
 def test_parse_bool(val, default, expected):

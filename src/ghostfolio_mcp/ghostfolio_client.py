@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from typing import Any
@@ -19,7 +20,7 @@ class GhostfolioClient:
     _instance = None
     _initialized = False
 
-    def __new__(cls, config: GhostfolioConfig | None = None):
+    def __new__(cls, config: GhostfolioConfig | None = None):  # noqa: ARG004
         """Create a new instance of GhostfolioClient."""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
@@ -66,7 +67,7 @@ class GhostfolioClient:
         if (
             self._jwt_token is not None
             and self._jwt_token_expiry
-            and self._jwt_token_expiry > datetime.now()
+            and self._jwt_token_expiry > datetime.now(UTC)
         ):
             return
 
@@ -79,7 +80,7 @@ class GhostfolioClient:
         resp.raise_for_status()
         result = resp.json()
         self._jwt_token = result["authToken"]
-        self._jwt_token_expiry = datetime.now() + timedelta(days=30)
+        self._jwt_token_expiry = datetime.now(UTC) + timedelta(days=30)
 
     async def request(
         self,

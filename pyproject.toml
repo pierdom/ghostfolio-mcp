@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ghostfolio-mcp"
-version = "1.4.3"
+version = "1.5.0"
 description = "MCP server for Ghostfolio management"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
@@ -46,6 +46,7 @@ dev = [
     "pytest-cov>=7.0.0",
     "ruff>=0.14.14",
     "ty>=0.0.17",
+    "typos>=1.48.0",
 ]
 
 [project.scripts]
@@ -73,19 +74,25 @@ target-version = "py311"
 # Unlike Flake8, Ruff doesn't enable pycodestyle warnings (`W`) or
 # McCabe complexity (`C901`) by default.
 select = [
-    "E",  # pycodestyle errors
-    "W",  # pycodestyle warnings
-    "F",  # pyflakes
-    "I",  # isort
-    "B",  # flake8-bugbear
-    "C4", # flake8-comprehensions
-    "UP", # pyupgrade
-    "N",  # pep8-naming
-    "S",  # flake8-bandit
-    "T20", # flake8-print
-    "SIM", # flake8-simplify
-    "LOG", # flake8-logging
-    "RUF", # Ruff-specific rules
+    "ARG",  # flake8-unused-arguments
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "DTZ",  # flake8-datetimez
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "FURB", # refurb
+    "I",    # isort
+    "LOG",  # flake8-logging
+    "N",    # pep8-naming
+    "PERF", # Perflint
+    "PT",   # flake8-pytest-style
+    "PTH",  # flake8-use-pathlib
+    "RUF",  # Ruff-specific rules
+    "S",    # flake8-bandit
+    "SIM",  # flake8-simplify
+    "T20",  # flake8-print
+    "UP",   # pyupgrade
+    "W",    # pycodestyle warnings
 ]
 
 ignore = [
@@ -124,6 +131,9 @@ docstring-code-line-length = "dynamic"
 [tool.ruff.lint.isort]
 known-first-party = ["ghostfolio_mcp"]
 force-single-line = true
+
+[tool.typos.default.extend-identifiers]
+TrUe = "TrUe"
 
 [tool.commitizen]
 name = "cz_conventional_commits"
