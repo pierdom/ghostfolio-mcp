@@ -8,6 +8,7 @@ from pydantic import Field
 
 from ghostfolio_mcp.ghostfolio_client import get_ghostfolio_client
 from ghostfolio_mcp.models import GhostfolioConfig
+from ghostfolio_mcp.utils import quote_path_segment
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,9 @@ def register_assets_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             Dictionary containing asset profile information
         """
         async with get_ghostfolio_client(config) as client:
-            return await client.get(f"asset/{data_source}/{symbol}")
+            return await client.get(
+                f"asset/{quote_path_segment(data_source)}/{quote_path_segment(symbol)}"
+            )
 
     @mcp.tool(
         tags={"asset", "profile", "update"},
@@ -117,6 +120,10 @@ def register_assets_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             Dictionary containing the final profile state from the PATCH response
         """
         async with get_ghostfolio_client(config) as client:
+            profile_path = (
+                f"admin/profile-data/{quote_path_segment(data_source)}"
+                f"/{quote_path_segment(symbol)}"
+            )
             # POST admin/profile-data/{source}/{symbol} creates the record but
             # Ghostfolio responds with HTTP 500 on both the duplicate-create
             # path and (observed against v3.2.0) some first-time-create paths,
@@ -124,7 +131,7 @@ def register_assets_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             # the subsequent PATCH as the source of truth — PATCH will 404
             # loudly if the profile genuinely does not exist.
             try:
-                await client.post(f"admin/profile-data/{data_source}/{symbol}", data={})
+                await client.post(profile_path, data={})
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code != 500:
                     raise
@@ -137,9 +144,7 @@ def register_assets_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             if asset_sub_class:
                 patch_payload["assetSubClass"] = asset_sub_class
 
-            return await client.patch(
-                f"admin/profile-data/{data_source}/{symbol}", data=patch_payload
-            )
+            return await client.patch(profile_path, data=patch_payload)
 
     @mcp.tool(
         tags={"asset", "profile", "delete"},
@@ -176,4 +181,7 @@ def register_assets_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             Dictionary containing the deletion status
         """
         async with get_ghostfolio_client(config) as client:
-            return await client.delete(f"admin/profile-data/{data_source}/{symbol}")
+            return await client.delete(
+                f"admin/profile-data/{quote_path_segment(data_source)}"
+                f"/{quote_path_segment(symbol)}"
+            )

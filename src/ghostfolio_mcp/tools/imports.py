@@ -7,6 +7,7 @@ from pydantic import Field
 
 from ghostfolio_mcp.ghostfolio_client import get_ghostfolio_client
 from ghostfolio_mcp.models import GhostfolioConfig
+from ghostfolio_mcp.utils import quote_path_segment
 
 logger = logging.getLogger(__name__)
 
@@ -77,4 +78,7 @@ def register_imports_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             Dictionary containing list of dividend transactions formatted for import.
         """
         async with get_ghostfolio_client(config) as client:
-            return await client.get(f"import/dividends/{data_source}/{symbol}")
+            return await client.get(
+                f"import/dividends/{quote_path_segment(data_source)}"
+                f"/{quote_path_segment(symbol)}"
+            )

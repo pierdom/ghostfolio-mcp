@@ -7,6 +7,7 @@ from pydantic import Field
 
 from ghostfolio_mcp.ghostfolio_client import get_ghostfolio_client
 from ghostfolio_mcp.models import GhostfolioConfig
+from ghostfolio_mcp.utils import quote_path_segment
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,9 @@ def register_accounts_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             Dictionary containing account balance information
         """
         async with get_ghostfolio_client(config) as client:
-            return await client.get(f"account/{account_id}/balances")
+            return await client.get(
+                f"account/{quote_path_segment(account_id)}/balances"
+            )
 
     @mcp.tool(
         tags={"accounts", "read-only"},
@@ -167,7 +170,7 @@ def register_accounts_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             Dictionary containing the deletion status
         """
         async with get_ghostfolio_client(config) as client:
-            return await client.delete(f"account/{account_id}")
+            return await client.delete(f"account/{quote_path_segment(account_id)}")
 
     @mcp.tool(
         tags={"account", "read-only"},
@@ -193,7 +196,7 @@ def register_accounts_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             Dictionary containing the detailed account profile
         """
         async with get_ghostfolio_client(config) as client:
-            return await client.get(f"account/{account_id}")
+            return await client.get(f"account/{quote_path_segment(account_id)}")
 
     @mcp.tool(
         tags={"account", "update"},
@@ -275,7 +278,9 @@ def register_accounts_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             if platform_id is not None:
                 account_data["platformId"] = platform_id
 
-            return await client.put(f"account/{account_id}", data=account_data)
+            return await client.put(
+                f"account/{quote_path_segment(account_id)}", data=account_data
+            )
 
     @mcp.tool(
         tags={"account", "transfer"},

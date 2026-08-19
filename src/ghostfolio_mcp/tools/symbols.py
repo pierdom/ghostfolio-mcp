@@ -7,6 +7,7 @@ from pydantic import Field
 
 from ghostfolio_mcp.ghostfolio_client import get_ghostfolio_client
 from ghostfolio_mcp.models import GhostfolioConfig
+from ghostfolio_mcp.utils import quote_path_segment
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,9 @@ def register_symbols_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             Dictionary containing symbol data including price and market information
         """
         async with get_ghostfolio_client(config) as client:
-            return await client.get(f"symbol/{data_source}/{symbol}")
+            return await client.get(
+                f"symbol/{quote_path_segment(data_source)}/{quote_path_segment(symbol)}"
+            )
 
     @mcp.tool(
         tags={"symbol", "historical", "read-only"},
@@ -89,7 +92,11 @@ def register_symbols_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             Dictionary containing historical data for the specified date
         """
         async with get_ghostfolio_client(config) as client:
-            return await client.get(f"symbol/{data_source}/{symbol}/{date}")
+            return await client.get(
+                f"symbol/{quote_path_segment(data_source)}"
+                f"/{quote_path_segment(symbol)}"
+                f"/{quote_path_segment(date)}"
+            )
 
     @mcp.tool(
         tags={"symbol", "lookup", "read-only"},

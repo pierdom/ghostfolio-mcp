@@ -7,6 +7,7 @@ from pydantic import Field
 
 from ghostfolio_mcp.ghostfolio_client import get_ghostfolio_client
 from ghostfolio_mcp.models import GhostfolioConfig
+from ghostfolio_mcp.utils import quote_path_segment
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,10 @@ def register_market_data_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             Dictionary containing market data for the specified symbol
         """
         async with get_ghostfolio_client(config) as client:
-            return await client.get(f"market-data/{data_source}/{symbol}")
+            return await client.get(
+                f"market-data/{quote_path_segment(data_source)}"
+                f"/{quote_path_segment(symbol)}"
+            )
 
     @mcp.tool(
         tags={"market-data", "create"},
@@ -95,6 +99,7 @@ def register_market_data_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
         """
         async with get_ghostfolio_client(config) as client:
             return await client.post(
-                f"market-data/{data_source}/{symbol}",
+                f"market-data/{quote_path_segment(data_source)}"
+                f"/{quote_path_segment(symbol)}",
                 data={"marketData": market_data},
             )

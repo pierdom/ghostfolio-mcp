@@ -7,6 +7,7 @@ from pydantic import Field
 
 from ghostfolio_mcp.ghostfolio_client import get_ghostfolio_client
 from ghostfolio_mcp.models import GhostfolioConfig
+from ghostfolio_mcp.utils import quote_path_segment
 
 logger = logging.getLogger(__name__)
 
@@ -102,4 +103,7 @@ def register_watchlist_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             Dictionary containing the deletion status.
         """
         async with get_ghostfolio_client(config) as client:
-            return await client.delete(f"watchlist/{data_source}/{symbol}")
+            return await client.delete(
+                f"watchlist/{quote_path_segment(data_source)}"
+                f"/{quote_path_segment(symbol)}"
+            )

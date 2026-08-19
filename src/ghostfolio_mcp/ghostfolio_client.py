@@ -10,6 +10,7 @@ import httpx
 from ghostfolio_mcp.models import GhostfolioConfig
 from ghostfolio_mcp.models import TransportConfig
 from ghostfolio_mcp.utils import parse_bool
+from ghostfolio_mcp.utils import quote_path_segment
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,11 @@ class GhostfolioClient:
 
         await self._refresh_jwt_token()
 
-        # Build URL path. Ghostfolio's NestJS routes are inconsistent on the
+        # Build URL path. Callers assemble `path` themselves and must encode any
+        # caller-supplied segment with utils.quote_path_segment; `object_id` is a
+        # single segment, so it is encoded here.
+        #
+        # Ghostfolio's NestJS routes are inconsistent on the
         # trailing slash: most GET endpoints (asset, portfolio, account, etc.)
         # require the trailing slash, while several POST/PATCH/DELETE
         # endpoints — notably /market-data/MANUAL/<symbol>, /admin/profile-data
@@ -107,7 +112,7 @@ class GhostfolioClient:
         # slash. Match the slash to the method.
         url_path = f"/{api_version}/{path.lstrip('/')}"
         if object_id:
-            url_path = f"{url_path.rstrip('/')}/{object_id}"
+            url_path = f"{url_path.rstrip('/')}/{quote_path_segment(object_id)}"
 
         # Path-specific trailing slash logic because Ghostfolio's NestJS is inconsistent
         if method.upper() == "GET":
