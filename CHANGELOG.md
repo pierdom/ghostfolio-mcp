@@ -1,3 +1,15 @@
+## v1.6.0 (2026-08-19)
+
+### Feat
+
+- **auth**: add optional OIDC/OAuth authentication for HTTP transports (#67)
+
+### Fix
+
+- **client**: percent-encode caller-supplied URL path segments
+- **server**: resolve LOG_LEVEL case-insensitively
+- **config**: treat blank env vars as unset
+
 ## v1.5.0 (2026-07-14)
 
 ### Feat

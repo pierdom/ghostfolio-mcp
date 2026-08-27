@@ -1,6 +1,7 @@
 import pytest
 
 from ghostfolio_mcp.utils import parse_bool
+from ghostfolio_mcp.utils import quote_path_segment
 
 
 @pytest.mark.parametrize(
@@ -30,3 +31,44 @@ from ghostfolio_mcp.utils import parse_bool
 )
 def test_parse_bool(val, default, expected):
     assert parse_bool(val, default) is expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # Unreserved characters are left alone, so ordinary symbols, dates and
+        # UUIDs produce exactly the same path as before encoding was added.
+        ("AAPL", "AAPL"),
+        ("BTC-USD", "BTC-USD"),
+        ("TRUE-UNLISTED", "TRUE-UNLISTED"),
+        ("2026-04-30", "2026-04-30"),
+        (
+            "cb547e5c-1234-5678-9abc-def012345678",
+            "cb547e5c-1234-5678-9abc-def012345678",
+        ),
+        ("MANUAL", "MANUAL"),
+        # Characters that would otherwise change where the request goes.
+        ("A#B", "A%23B"),  # fragment: silently truncated the path
+        ("BTC/USD", "BTC%2FUSD"),  # extra path segment
+        ("A?B", "A%3FB"),  # start of the query string
+        ("BRK B", "BRK%20B"),
+        ("A%B", "A%25B"),
+        # Dot-only segments survive quoting as-is ('.' is unreserved) and are
+        # then removed by dot-segment normalisation, so escape the dots too.
+        (".", "%2E"),
+        ("..", "%2E%2E"),
+        ("...", "%2E%2E%2E"),
+        # Dots elsewhere in the value are harmless and stay readable.
+        ("BRK.B", "BRK.B"),
+    ],
+)
+def test_quote_path_segment(value, expected):
+    assert quote_path_segment(value) == expected
+
+
+@pytest.mark.parametrize("value", ["", " ", "\t", "\n  "])
+def test_quote_path_segment_rejects_empty(value):
+    # An empty segment collapses into the trailing slash and turns an item
+    # request into a collection one, so there is no safe request to make.
+    with pytest.raises(ValueError, match="must not be empty"):
+        quote_path_segment(value)

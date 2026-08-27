@@ -79,6 +79,20 @@ def test_blank_oidc_values_count_as_unset(monkeypatch):
     assert config.oidc_config_url is None
 
 
+# A declared-but-empty value must not become an empty redirect path.
+@pytest.mark.parametrize("value", ["", "   "])
+def test_blank_redirect_path_falls_back_to_the_default(monkeypatch, value):
+    monkeypatch.setenv("OIDC_REDIRECT_PATH", value)
+
+    assert get_transport_config_from_env().oidc_redirect_path == "/auth/callback"
+
+
+def test_redirect_path_is_read_and_stripped(monkeypatch):
+    monkeypatch.setenv("OIDC_REDIRECT_PATH", "  /oauth/callback  ")
+
+    assert get_transport_config_from_env().oidc_redirect_path == "/oauth/callback"
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
