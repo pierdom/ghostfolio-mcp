@@ -7,6 +7,7 @@ from typing import Any
 from fastmcp import FastMCP
 from pydantic import Field
 
+from ghostfolio_mcp.ghostfolio_client import ensure_write_allowed
 from ghostfolio_mcp.ghostfolio_client import get_ghostfolio_client
 from ghostfolio_mcp.models import GhostfolioConfig
 from ghostfolio_mcp.utils import quote_path_segment
@@ -265,6 +266,10 @@ def register_accounts_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             Dictionary containing the updated account status
         """
         async with get_ghostfolio_client(config) as client:
+            # This tool reads the account before it writes to it - refuse up
+            # front so read-only mode blocks the read too, not just the PUT.
+            ensure_write_allowed(config, f"update account '{account_id}'")
+
             current = await client.get(f"account/{quote_path_segment(account_id)}")
 
             # id, name, currency and platformId are required by Ghostfolio's

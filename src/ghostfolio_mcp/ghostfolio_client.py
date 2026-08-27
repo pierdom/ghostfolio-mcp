@@ -14,10 +14,37 @@ from ghostfolio_mcp.utils import quote_path_segment
 
 logger = logging.getLogger(__name__)
 
+# Methods that mutate state on the Ghostfolio server. Anything else (GET, HEAD,
+# OPTIONS) is allowed under READ_ONLY_MODE.
+_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
 # Response bodies are attacker/server controlled and can be arbitrarily large
 # (e.g. an HTML error page from a misconfigured reverse proxy); truncate what
 # we fold into an exception message.
 _MAX_ERROR_BODY_LENGTH = 2000
+
+
+class ReadOnlyModeError(PermissionError):
+    """Raised when a write operation is attempted while READ_ONLY_MODE is enabled."""
+
+
+def ensure_write_allowed(config: GhostfolioConfig, description: str) -> None:
+    """Raise ReadOnlyModeError up front if the server is in read-only mode.
+
+    GhostfolioClient.request() already refuses every non-GET call under
+    READ_ONLY_MODE, so this is not the source of truth - it is a pure
+    optimization for a tool that must perform a read before its write (e.g.
+    fetching current field values to satisfy an API that requires the full
+    object on update). Skipping it only wastes an extra read; request() still
+    blocks the write either way. Call it before that read so a write tool
+    refuses before issuing *any* request, not just the final mutating one.
+    """
+    if config.read_only_mode:
+        raise ReadOnlyModeError(
+            f"Refusing to {description}: READ_ONLY_MODE is enabled on this "
+            "server, so only read operations are permitted. Unset "
+            "READ_ONLY_MODE (or set it to false) to allow write operations."
+        )
 
 
 def _annotate_with_response_body(exc: httpx2.HTTPStatusError) -> httpx2.HTTPStatusError:
@@ -120,6 +147,15 @@ class GhostfolioClient:
         object_id: str | None = None,
     ) -> dict[str, Any]:
         """Perform a request to a Ghostfolio API path."""
+        # Checked first and before any I/O (including the auth token refresh
+        # below) so a write is refused without ever reaching the network.
+        if method.upper() in _WRITE_METHODS and self.config.read_only_mode:
+            raise ReadOnlyModeError(
+                f"Refusing to {method.upper()} '{path}': READ_ONLY_MODE is enabled "
+                "on this server, so only read operations are permitted. Unset "
+                "READ_ONLY_MODE (or set it to false) to allow write operations."
+            )
+
         if self.client is None:
             raise RuntimeError(
                 "Client not initialized - use 'async with GhostfolioClient(config)' or call __aenter__"
