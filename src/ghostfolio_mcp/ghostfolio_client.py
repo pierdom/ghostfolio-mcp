@@ -14,6 +14,57 @@ from ghostfolio_mcp.utils import quote_path_segment
 
 logger = logging.getLogger(__name__)
 
+# Methods that mutate state on the Ghostfolio server. Anything else (GET, HEAD,
+# OPTIONS) is allowed under READ_ONLY_MODE.
+_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+# Response bodies are attacker/server controlled and can be arbitrarily large
+# (e.g. an HTML error page from a misconfigured reverse proxy); truncate what
+# we fold into an exception message.
+_MAX_ERROR_BODY_LENGTH = 2000
+
+
+class ReadOnlyModeError(PermissionError):
+    """Raised when a write operation is attempted while READ_ONLY_MODE is enabled."""
+
+
+def ensure_write_allowed(config: GhostfolioConfig, description: str) -> None:
+    """Raise ReadOnlyModeError up front if the server is in read-only mode.
+
+    GhostfolioClient.request() already refuses every non-GET call under
+    READ_ONLY_MODE, so this is not the source of truth - it is a pure
+    optimization for a tool that must perform a read before its write (e.g.
+    fetching current field values to satisfy an API that requires the full
+    object on update). Skipping it only wastes an extra read; request() still
+    blocks the write either way. Call it before that read so a write tool
+    refuses before issuing *any* request, not just the final mutating one.
+    """
+    if config.read_only_mode:
+        raise ReadOnlyModeError(
+            f"Refusing to {description}: READ_ONLY_MODE is enabled on this "
+            "server, so only read operations are permitted. Unset "
+            "READ_ONLY_MODE (or set it to false) to allow write operations."
+        )
+
+
+def _annotate_with_response_body(exc: httpx.HTTPStatusError) -> httpx.HTTPStatusError:
+    """Fold the response body into an HTTPStatusError's message.
+
+    httpx's own message (e.g. "Client error '400 Bad Request' for url ...")
+    omits the body, which is where Ghostfolio's NestJS validation errors put
+    the actual reason. Re-raising a new instance with the same request/response
+    keeps ``exc.response.status_code`` usable by callers that inspect it
+    (see assets.py's upsert_asset_profile) while making the body visible
+    wherever the exception is stringified.
+    """
+    body = exc.response.text.strip()
+    if len(body) > _MAX_ERROR_BODY_LENGTH:
+        body = body[:_MAX_ERROR_BODY_LENGTH] + "... (truncated)"
+    message = str(exc)
+    if body:
+        message = f"{message} | response body: {body}"
+    return httpx.HTTPStatusError(message, request=exc.request, response=exc.response)
+
 
 class GhostfolioClient:
     """Async client for Ghostfolio API using API token authentication"""
@@ -78,7 +129,10 @@ class GhostfolioClient:
         resp = await self.client.post(
             "/v1/auth/anonymous/", json={"accessToken": self.config.token}
         )
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise _annotate_with_response_body(exc) from exc
         result = resp.json()
         self._jwt_token = result["authToken"]
         self._jwt_token_expiry = datetime.now(UTC) + timedelta(days=30)
@@ -93,6 +147,15 @@ class GhostfolioClient:
         object_id: str | None = None,
     ) -> dict[str, Any]:
         """Perform a request to a Ghostfolio API path."""
+        # Checked first and before any I/O (including the auth token refresh
+        # below) so a write is refused without ever reaching the network.
+        if method.upper() in _WRITE_METHODS and self.config.read_only_mode:
+            raise ReadOnlyModeError(
+                f"Refusing to {method.upper()} '{path}': READ_ONLY_MODE is enabled "
+                "on this server, so only read operations are permitted. Unset "
+                "READ_ONLY_MODE (or set it to false) to allow write operations."
+            )
+
         if self.client is None:
             raise RuntimeError(
                 "Client not initialized - use 'async with GhostfolioClient(config)' or call __aenter__"
@@ -135,7 +198,10 @@ class GhostfolioClient:
         resp = await self.client.request(
             method, url_path, params=params, json=data, headers=headers
         )
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise _annotate_with_response_body(exc) from exc
         # Some Ghostfolio admin endpoints (e.g. PATCH
         # /admin/profile-data/MANUAL/<symbol>) return 200 with an empty body.
         # resp.json() raises JSONDecodeError on empty content; treat empty as
