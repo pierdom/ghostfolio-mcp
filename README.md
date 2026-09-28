@@ -167,6 +167,12 @@ TOOL_SEARCH_STRATEGY=bm25
 # Maximum number of tools returned by search_tools
 TOOL_SEARCH_MAX_RESULTS=5
 
+# Interest Attribution (Optional, used by get_monthly_returns)
+# JSON object keyed by Ghostfolio account ID. "previous_month" books a payment
+# in the month before its payment date under interest_attribution=accrual;
+# "expected": "monthly" flags months without interest from that account.
+# INTEREST_RULES={"<account-id>": {"attribution": "previous_month", "expected": "monthly"}}
+
 # Sentry Error Tracking (Optional)
 # Set SENTRY_DSN to enable error tracking and performance monitoring
 # SENTRY_DSN=https://your-key@o12345.ingest.us.sentry.io/6789
@@ -292,6 +298,7 @@ Sentry is completely optional. If you don't set `SENTRY_DSN`, the server will ru
 ### Portfolio & Transaction Management Tools
 
 - `get_portfolio_performance`: Get portfolio performance data including returns, benchmarks, and performance metrics
+- `get_monthly_returns`: Deterministic per-month returns (net/gross P&L, fees, interest per account, flows, TWR, Modified Dietz) with data-quality flags - see [Monthly Returns](#monthly-returns)
 - `get_portfolio_holdings`: Get portfolio holdings and positions including allocations and asset breakdowns
 - `get_portfolio_details`: Get comprehensive portfolio details including accounts, positions, and summary
 - `get_position`: Get position details for a specific symbol from a data source
@@ -554,6 +561,46 @@ MCP_ALLOWED_ORIGINS=https://app.example.com
 ```
 
 Only loopback hosts are accepted out of the box, so behind a reverse proxy the public hostname must be allowed, otherwise every request is answered with `421 Misdirected Request`. Setting `OIDC_BASE_URL` covers that automatically; add anything else, such as a browser client's origin, to the two lists above.
+
+## Monthly Returns
+
+`get_monthly_returns` computes monthly figures server-side from the daily performance chart and the activity list, so the same Ghostfolio data always gives byte-identical output. The calculation lives in `ghostfolio_mcp.analytics.monthly_returns` (pure, no I/O), and every response carries `method_version` plus the window, timezone and rules it used.
+
+Inputs: `start_month`, `end_month` (`YYYY-MM`), `timezone` (default `Europe/Madrid`) and `interest_attribution` (`payment_date` or `accrual`).
+
+Data and window:
+
+- The chart is fetched with the shortest daily range (`mtd`, `ytd`, `1y`) that has a row before `start_month`. Longer ranges skip days, so months older than about a year are refused rather than approximated.
+- All deltas come from that single chart response. Today's row is dropped (`window.dropped_chart_dates`) because its prices are still moving.
+- Returns cover the securities sleeve only (chart `value`, cash excluded) and are net of fees. Interest is reported next to them, not inside them.
+
+Two calendars:
+
+- Ghostfolio buckets activities into chart days on its server calendar (UTC). Chart-derived figures - P&L, flows, TWR, Modified Dietz - and the fees that make up `market_pnl_gross` follow that calendar.
+- Interest, sell days and the per-account breakdown use each activity's date converted to `timezone`. An activity whose two months differ is listed in `calendar_mismatches`.
+
+Definitions, per chart day `d` with netPerformance `NP`, value `V` and total investment `I`:
+
+| Field | Definition |
+| --- | --- |
+| `market_pnl_net` | Σ ΔNP |
+| `fees` | Σ activity fees on the month's chart days |
+| `market_pnl_gross` | `market_pnl_net + fees` |
+| `interest` | Σ INTEREST activities attributed to the month, with `interest_by_account` |
+| `total_gross` | `market_pnl_gross + interest` |
+| `net_flows` | Σ ΔI (buys minus sells, at cost) |
+| flow `F` | `ΔV - ΔNP`: money entering (+) or leaving (-) the securities, at market value, at the start of the day |
+| `twr` | Π (1 + ΔNP / (V[d-1] + F)) - 1 |
+| `avg_invested_capital` | `V0 + Σ w·F`, `w = (D - i + 1) / D`; `V0` is the value before the month, `i` the calendar day, `D` the days covered |
+| `modified_dietz` | `market_pnl_net / avg_invested_capital` |
+
+With no flows in a month, `twr` equals `modified_dietz`. If money is earned on zero capital (a full sale), `twr` is `null` and the day is listed in `undefined_return_days`.
+
+Flags per month: `partial_month`, `sell_days`, `missing_interest_accounts`, `invariant_breaks`, `chart_gaps`, `boundary_gap` (a missing day across a month boundary, so a delta mixes two months), `calendar_mismatches` and `undefined_return_days`.
+
+The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees = 0` within 0.01. It is expected to break on sell days (execution vs. closing price). A break equal to that day's interest (`hint: matches_interest`) means Ghostfolio started counting interest inside netPerformance. Breaks are reported, never corrected.
+
+`accrual` applies the per-account rules in `INTEREST_RULES`. Accounts without a rule keep their payment date. Values are rounded only in the output: money to 2 decimals, ratios to 8.
 
 ## Data Sources
 

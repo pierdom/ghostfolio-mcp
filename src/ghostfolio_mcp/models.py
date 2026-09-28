@@ -4,6 +4,19 @@ from pydantic import BaseModel
 from pydantic import Field
 
 
+class InterestRuleConfig(BaseModel):
+    """Per-account interest attribution rule, used by get_monthly_returns."""
+
+    attribution: Literal["payment_date", "previous_month"] = Field(
+        "payment_date",
+        description="Month interest is attributed to under 'accrual' attribution",
+    )
+    expected: Literal["none", "monthly"] = Field(
+        "none",
+        description="'monthly' flags months in which the account paid no interest",
+    )
+
+
 class GhostfolioConfig(BaseModel):
     ghostfolio_url: str = Field(
         ..., description="Ghostfolio base URL, e.g. https://domain.tld:3333"
@@ -32,6 +45,10 @@ class GhostfolioConfig(BaseModel):
         5,
         ge=1,
         description="Maximum number of tools returned by search_tools",
+    )
+    interest_rules: dict[str, InterestRuleConfig] = Field(
+        default_factory=dict,
+        description="Interest attribution rules keyed by Ghostfolio account ID",
     )
 
 

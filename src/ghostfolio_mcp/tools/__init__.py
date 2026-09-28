@@ -7,6 +7,7 @@ from fastmcp import FastMCP
 from ghostfolio_mcp.models import GhostfolioConfig
 from ghostfolio_mcp.tools.accounts import register_accounts_tools
 from ghostfolio_mcp.tools.activities import register_activities_tools
+from ghostfolio_mcp.tools.analytics import register_analytics_tools
 from ghostfolio_mcp.tools.assets import register_assets_tools
 from ghostfolio_mcp.tools.benchmarks import register_benchmarks_tools
 from ghostfolio_mcp.tools.exchange_rates import register_exchange_rates_tools
@@ -23,6 +24,7 @@ from ghostfolio_mcp.tools.watchlist import register_watchlist_tools
 def register_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
     """Register all Ghostfolio tools with the FastMCP server."""
     register_accounts_tools(mcp, config)
+    register_analytics_tools(mcp, config)
     register_activities_tools(mcp, config)
     register_assets_tools(mcp, config)
     register_benchmarks_tools(mcp, config)

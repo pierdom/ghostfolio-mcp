@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from datetime import UTC
@@ -8,6 +9,7 @@ from typing import Any
 import httpx2
 
 from ghostfolio_mcp.models import GhostfolioConfig
+from ghostfolio_mcp.models import InterestRuleConfig
 from ghostfolio_mcp.models import TransportConfig
 from ghostfolio_mcp.utils import parse_bool
 from ghostfolio_mcp.utils import quote_path_segment
@@ -289,7 +291,22 @@ def get_ghostfolio_config_from_env() -> GhostfolioConfig:
             else "bm25"
         ),
         tool_search_max_results=int(os.getenv("TOOL_SEARCH_MAX_RESULTS", "5")),
+        interest_rules=_interest_rules_from_env(),
     )
+
+
+def _interest_rules_from_env() -> dict[str, InterestRuleConfig]:
+    """Parse INTEREST_RULES: a JSON object of account ID -> rule, blank = none."""
+    raw = os.getenv("INTEREST_RULES", "").strip()
+    if not raw:
+        return {}
+    rules = json.loads(raw)
+    if not isinstance(rules, dict):
+        raise ValueError("INTEREST_RULES must be a JSON object keyed by account ID")
+    return {
+        str(account_id): InterestRuleConfig.model_validate(rule)
+        for account_id, rule in rules.items()
+    }
 
 
 def get_transport_config_from_env() -> TransportConfig:
