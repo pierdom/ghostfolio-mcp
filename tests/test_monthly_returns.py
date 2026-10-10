@@ -172,8 +172,8 @@ def test_fee_days_do_not_break_the_invariant():
 
 
 def test_sell_day_break_is_reported_not_corrected():
-    # Sold 1.00 of value at cost 0.80; the closing price the chart uses
-    # differs from execution, so dNP != dV - dInvestment by 0.02.
+    # Sold for 0.82 what closed at 1.00, at a cost of 0.80: dNP = 0.82 - 1.00,
+    # and the break is the realized gain, 0.82 - 0.80 = 0.02.
     chart = build_chart("2026-03-31", flat_days(30), value=2.0, investment=1.6)
     for row in chart[10:]:
         row["valueWithCurrencyEffect"] -= 1.0

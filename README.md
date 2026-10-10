@@ -614,7 +614,7 @@ With no flows in a month, `twr` equals `modified_dietz`. If money is earned on z
 
 Flags per month: `partial_month`, `sell_days`, `missing_interest_accounts`, `invariant_breaks`, `chart_gaps`, `boundary_gap` (a missing day across a month boundary, so a delta mixes two months), `calendar_mismatches` and `undefined_return_days`.
 
-The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees + interest_fees = 0` within 0.01. It is expected to break on sell days (execution vs. closing price). A break equal to that day's interest (`hint: matches_interest`) means Ghostfolio started counting interest inside netPerformance. Breaks are reported, never corrected.
+The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees + interest_fees = 0` within 0.01. It is expected to break on sell days, by the realized gain on Ghostfolio's own (average) cost basis; on those days the flow `F` equals minus the sale proceeds. A break equal to that day's interest (`hint: matches_interest`) means Ghostfolio started counting interest inside netPerformance. Breaks are reported, never corrected.
 
 `accrual` applies the per-account interest rules in `ACCOUNT_PROFILES`. Accounts without a rule keep their payment date. Values are rounded only in the output: money to 2 decimals, ratios to 8.
 

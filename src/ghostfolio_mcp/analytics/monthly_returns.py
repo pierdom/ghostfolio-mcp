@@ -25,9 +25,10 @@ Conventions (``METHOD_VERSION`` changes whenever one of these does):
   added back in ``market_pnl_gross``. ``interest`` is gross.
 - Daily external flow is ``F = dV - dNP``: the money that entered or left the
   securities sleeve, valued at market. On ordinary days that equals
-  ``dInvestment + fees``; on a sell day it also carries the difference between
-  execution and closing price. It is negative for a net sale. ``net_flows`` is
-  reported separately, at cost (sum of ``dInvestment``).
+  ``dInvestment + fees``; on a sell day it is minus the sale proceeds, since
+  the sale moves ``proceeds - value at close`` into netPerformance. It is
+  negative for a net sale. ``net_flows`` is reported separately, at cost (sum
+  of ``dInvestment``).
 - Flows happen at the start of the day, so capital at work on day d is
   ``V[d-1] + F[d]`` and the daily return is ``dNP[d] / (V[d-1] + F[d])``.
 - ``avg_invested_capital = V0 + sum(w[d] * F[d])`` with
@@ -36,7 +37,8 @@ Conventions (``METHOD_VERSION`` changes whenever one of these does):
   number of calendar days covered. Modified Dietz is
   ``market_pnl_net / avg_invested_capital``.
 - Invariant, per chart day: ``dNP - (dV - dInvestment) + fees == 0`` within
-  ``invariant_tolerance``. It is expected to break on sell days; a break equal
+  ``invariant_tolerance``. It is expected to break on sell days, by the
+  realized gain on Ghostfolio's (average) cost basis; a break equal
   to that day's interest means Ghostfolio started counting interest inside
   netPerformance. Breaks are reported, never corrected.
 """
