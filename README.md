@@ -311,6 +311,7 @@ Sentry is completely optional. If you don't set `SENTRY_DSN`, the server will ru
 - `get_portfolio_performance`: Get portfolio performance data including returns, benchmarks, and performance metrics
 - `audit_portfolio_data`: Read-only data-quality audit - trades booked a day off, duplicates, misdated or missing interest, stale balances and prices, chart gaps and more - see [Portfolio Data Audit](#portfolio-data-audit)
 - `get_cash_yield`: Effective interest yield on cash per account and month, from balance history - see [Cash Yield](#cash-yield)
+- `get_realized_gains`: FIFO realized gains per sale and tax year, with lots consumed and a two-month-rule flag - see [Realized Gains](#realized-gains)
 - `get_monthly_returns`: Deterministic per-month returns (net/gross P&L, fees, interest per account, flows, TWR, Modified Dietz) with data-quality flags - see [Monthly Returns](#monthly-returns)
 - `get_portfolio_holdings`: Get portfolio holdings and positions including allocations and asset breakdowns
 - `get_portfolio_details`: Get comprehensive portfolio details including accounts, positions, and summary
@@ -655,6 +656,19 @@ The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees = 0` within 0.01. 
 - `new`: none of the above.
 
 Warnings never change the status: a local-midnight timestamp (Ghostfolio books it on the previous UTC day), a date-only value (read as UTC midnight), a future date, an unknown or missing `accountId`. The tool only reads, so it also works in `READ_ONLY_MODE`.
+
+## Realized Gains
+
+`get_realized_gains` matches lots first-in, first-out and reports every sale (or those of one `year`), a summary per tax year and the open lots. It is read-only and deterministic, and it is not tax advice.
+
+- Lots are pooled per asset (`dataSource:symbol`) across all accounts. Accounts with `tax.excluded` in `ACCOUNT_PROFILES` (e.g. a pension plan) are left out.
+- Activities are processed in timestamp order (a BUY first on a tie). Buy fees add to cost and sell fees reduce proceeds; a partly used lot gives up cost in proportion to quantity.
+- Dates and tax years are the activity's date in `timezone`.
+- Two-month rule: a sale at a loss is flagged when the same asset was bought within two calendar months before or after and those shares were still held after the sale. The flag gives the affected quantity, its share and the affected loss; the loss is reported unchanged, and `by_year` totals the flagged part in `losses_flagged_two_month_rule`.
+- A sale larger than the shares held reports the uncovered quantity and no gain.
+- Only base-currency trades are supported; anything else is refused.
+
+Assets are identified by `dataSource:symbol`, so the same security bought under two listings counts as two assets (see the audit's `missing_isin` check).
 
 ## Data Sources
 

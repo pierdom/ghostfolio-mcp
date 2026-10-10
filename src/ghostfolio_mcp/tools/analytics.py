@@ -33,6 +33,8 @@ from ghostfolio_mcp.analytics.monthly_returns import compute_monthly_returns
 from ghostfolio_mcp.analytics.monthly_returns import month_start
 from ghostfolio_mcp.analytics.monthly_returns import parse_activities
 from ghostfolio_mcp.analytics.monthly_returns import parse_chart
+from ghostfolio_mcp.analytics.realized_gains import GainsConfig
+from ghostfolio_mcp.analytics.realized_gains import compute_realized_gains
 from ghostfolio_mcp.ghostfolio_client import get_ghostfolio_client
 from ghostfolio_mcp.models import GhostfolioConfig
 from ghostfolio_mcp.utils import quote_path_segment
@@ -438,3 +440,69 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             PreviewConfig(timezone=timezone, interest_rules=_interest_rules(config)),
             _today(timezone),
         )
+
+    @mcp.tool(
+        tags={"portfolio", "analytics", "tax", "read-only"},
+        annotations={
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+        },
+    )
+    async def get_realized_gains(
+        year: Annotated[
+            int | None,
+            Field(
+                default=None,
+                description="Tax year to report sales for; omit for every sale",
+            ),
+        ] = None,
+        timezone: Annotated[
+            str,
+            Field(
+                default="Europe/Madrid",
+                description="IANA timezone sale dates and tax years are read in",
+            ),
+        ] = "Europe/Madrid",
+    ) -> dict[str, Any]:
+        """
+        Get realized gains per sale with FIFO lot matching, and per tax year.
+
+        Read-only and deterministic; not tax advice. Lots are matched
+        first-in, first-out per asset across all accounts; accounts with
+        tax.excluded in ACCOUNT_PROFILES (e.g. a pension plan) are left out.
+        Buy fees add to cost, sell fees reduce proceeds. A loss with the same
+        asset bought within two months before or after and still held is
+        flagged (two-month rule) with the affected quantity and loss; the
+        loss is not changed. Each sale lists the lots it consumed; open lots
+        are returned for reconciliation. Only base-currency trades are
+        supported.
+
+        Args:
+            year: Tax year to report sales for; omit for every sale
+            timezone: IANA timezone sale dates and tax years are read in
+
+        Returns:
+            Dictionary with method_version, config, year, sales, by_year and open_lots
+        """
+        _check_timezone(timezone)
+        async with get_ghostfolio_client(config) as client:
+            raw_activities = (await client.get("activities")).get("activities") or []
+            user = await client.get("user")
+        try:
+            return compute_realized_gains(
+                parse_activities(raw_activities, timezone, CHART_TIMEZONE),
+                GainsConfig(
+                    timezone=timezone,
+                    base_currency=(user.get("settings") or {}).get("baseCurrency")
+                    or "EUR",
+                    excluded_accounts=frozenset(
+                        account_id
+                        for account_id, profile in config.account_profiles.items()
+                        if profile.tax.excluded
+                    ),
+                ),
+                year,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
