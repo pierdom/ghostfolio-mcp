@@ -16,6 +16,13 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
+from ghostfolio_mcp.analytics.audit import AccountInfo
+from ghostfolio_mcp.analytics.audit import AuditConfig
+from ghostfolio_mcp.analytics.audit import BalanceSnapshot
+from ghostfolio_mcp.analytics.audit import audit_portfolio
+from ghostfolio_mcp.analytics.audit import parse_balance_snapshots
+from ghostfolio_mcp.analytics.common import PricePoint
+from ghostfolio_mcp.analytics.common import parse_market_data
 from ghostfolio_mcp.analytics.monthly_returns import InterestRule
 from ghostfolio_mcp.analytics.monthly_returns import ReturnsConfig
 from ghostfolio_mcp.analytics.monthly_returns import compute_monthly_returns
@@ -24,6 +31,7 @@ from ghostfolio_mcp.analytics.monthly_returns import parse_activities
 from ghostfolio_mcp.analytics.monthly_returns import parse_chart
 from ghostfolio_mcp.ghostfolio_client import get_ghostfolio_client
 from ghostfolio_mcp.models import GhostfolioConfig
+from ghostfolio_mcp.utils import quote_path_segment
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +47,69 @@ DAILY_CHART_RANGES = ("mtd", "ytd", "1y")
 def _today(timezone: str) -> date:
     """Today's date in a timezone. Separate so tests can pin the clock."""
     return datetime.now(ZoneInfo(timezone)).date()
+
+
+def _check_timezone(timezone: str) -> None:
+    try:
+        ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ToolError(f"Unknown timezone {timezone!r}") from exc
+
+
+def _interest_rules(config: GhostfolioConfig) -> dict[str, InterestRule]:
+    return {
+        account_id: InterestRule(
+            attribution=profile.interest.attribution,
+            expected=profile.interest.expected,
+        )
+        for account_id, profile in config.account_profiles.items()
+    }
+
+
+def _security_key(data_source: str, symbol: str) -> str:
+    return f"{data_source}:{symbol}"
+
+
+async def _fetch_prices(
+    client: Any, securities: list[tuple[str, str]]
+) -> tuple[dict[str, list[PricePoint]], dict[str, str | None]]:
+    """Stored daily prices and ISIN per DATASOURCE:SYMBOL, read-only."""
+    prices: dict[str, list[PricePoint]] = {}
+    isins: dict[str, str | None] = {}
+    for data_source, symbol in sorted(set(securities)):
+        asset = await client.get(
+            f"asset/{quote_path_segment(data_source)}/{quote_path_segment(symbol)}"
+        )
+        key = _security_key(data_source, symbol)
+        prices[key] = parse_market_data(asset.get("marketData") or [])
+        isins[key] = (asset.get("assetProfile") or {}).get("isin") or None
+    return prices, isins
+
+
+async def _fetch_accounts(
+    client: Any,
+) -> tuple[list[AccountInfo], list[BalanceSnapshot]]:
+    """Accounts with their cash balance, plus every balance-history entry."""
+    raw_accounts = (await client.get("account")).get("accounts") or []
+    accounts = []
+    snapshots: list[BalanceSnapshot] = []
+    for raw in sorted(raw_accounts, key=lambda a: a["id"]):
+        tags = {str(tag.get("name")) for tag in raw.get("tags") or []}
+        accounts.append(
+            AccountInfo(
+                id=raw["id"],
+                name=raw.get("name") or "",
+                balance=float(
+                    raw.get("balanceInBaseCurrency", raw.get("balance")) or 0
+                ),
+                excluded_from_analysis="EXCLUDE_FROM_ANALYSIS" in tags,
+            )
+        )
+        history = await client.get(f"account/{quote_path_segment(raw['id'])}/balances")
+        snapshots.extend(
+            parse_balance_snapshots(raw["id"], history.get("balances") or [])
+        )
+    return accounts, snapshots
 
 
 def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
@@ -97,22 +168,13 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
         Returns:
             Dictionary with method_version, config, window, months and summary
         """
-        try:
-            ZoneInfo(timezone)
-        except (ZoneInfoNotFoundError, ValueError) as exc:
-            raise ToolError(f"Unknown timezone {timezone!r}") from exc
+        _check_timezone(timezone)
 
         returns_config = ReturnsConfig(
             timezone=timezone,
             chart_timezone=CHART_TIMEZONE,
             interest_attribution=interest_attribution,
-            interest_rules={
-                account_id: InterestRule(
-                    attribution=profile.interest.attribution,
-                    expected=profile.interest.expected,
-                )
-                for account_id, profile in config.account_profiles.items()
-            },
+            interest_rules=_interest_rules(config),
         )
         try:
             window_start = month_start(start_month)
@@ -155,3 +217,76 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             raise ToolError(str(exc)) from exc
         result["window"]["chart_range"] = chart_range
         return result
+
+    @mcp.tool(
+        tags={"portfolio", "analytics", "audit", "read-only"},
+        annotations={
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+        },
+    )
+    async def audit_portfolio_data(
+        timezone: Annotated[
+            str,
+            Field(
+                default="Europe/Madrid",
+                description="IANA timezone activity dates are read in",
+            ),
+        ] = "Europe/Madrid",
+    ) -> dict[str, Any]:
+        """
+        Audit the portfolio data for problems that skew analytics.
+
+        Read-only and deterministic. Checks activities, accounts, balance
+        history, stored prices and the daily performance chart, and returns
+        findings with a severity (error, warn, info), the activities and dates
+        involved and the evidence: trades booked a day off because of their
+        timestamp, prices far from the close, duplicates, misdated or missing
+        interest, cash without interest, stale balances and prices, chart gaps
+        and invariant breaks, a legacy seed position, mixed timestamp styles,
+        and assets without ISIN. Nothing is corrected.
+
+        Args:
+            timezone: IANA timezone activity dates are read in
+
+        Returns:
+            Dictionary with method_version, as_of, config, summary and findings
+        """
+        _check_timezone(timezone)
+        as_of = _today(timezone) - timedelta(days=1)
+        async with get_ghostfolio_client(config) as client:
+            raw_activities = (await client.get("activities")).get("activities") or []
+            activities = parse_activities(raw_activities, timezone, CHART_TIMEZONE)
+            accounts, snapshots = await _fetch_accounts(client)
+            performance = await client.get(
+                "portfolio/performance", params={"range": "1y"}, api_version="v2"
+            )
+            prices, isins = await _fetch_prices(
+                client,
+                [
+                    (a.data_source, a.symbol)
+                    for a in activities
+                    if a.type in ("BUY", "SELL")
+                ],
+            )
+            user = await client.get("user")
+        rows = [
+            r for r in parse_chart(performance.get("chart") or []) if r.date <= as_of
+        ]
+        base_currency = (user.get("settings") or {}).get("baseCurrency") or "EUR"
+        return audit_portfolio(
+            activities,
+            accounts,
+            snapshots,
+            prices,
+            isins,
+            rows,
+            AuditConfig(
+                timezone=timezone,
+                chart_timezone=CHART_TIMEZONE,
+                base_currency=base_currency,
+                interest_rules=_interest_rules(config),
+            ),
+            as_of,
+        )

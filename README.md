@@ -309,6 +309,7 @@ Sentry is completely optional. If you don't set `SENTRY_DSN`, the server will ru
 ### Portfolio & Transaction Management Tools
 
 - `get_portfolio_performance`: Get portfolio performance data including returns, benchmarks, and performance metrics
+- `audit_portfolio_data`: Read-only data-quality audit - trades booked a day off, duplicates, misdated or missing interest, stale balances and prices, chart gaps and more - see [Portfolio Data Audit](#portfolio-data-audit)
 - `get_monthly_returns`: Deterministic per-month returns (net/gross P&L, fees, interest per account, flows, TWR, Modified Dietz) with data-quality flags - see [Monthly Returns](#monthly-returns)
 - `get_portfolio_holdings`: Get portfolio holdings and positions including allocations and asset breakdowns
 - `get_portfolio_details`: Get comprehensive portfolio details including accounts, positions, and summary
@@ -612,6 +613,25 @@ Flags per month: `partial_month`, `sell_days`, `missing_interest_accounts`, `inv
 The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees = 0` within 0.01. It is expected to break on sell days (execution vs. closing price). A break equal to that day's interest (`hint: matches_interest`) means Ghostfolio started counting interest inside netPerformance. Breaks are reported, never corrected.
 
 `accrual` applies the per-account interest rules in `ACCOUNT_PROFILES`. Accounts without a rule keep their payment date. Values are rounded only in the output: money to 2 decimals, ratios to 8.
+
+## Portfolio Data Audit
+
+`audit_portfolio_data` checks the data the analytics tools rely on and returns findings, most severe first. Each finding has a `check`, a `severity` (`error`, `warn`, `info`), the account, asset, dates and activity ids involved, and the `evidence`. Nothing is corrected. It is read-only and deterministic, measured against yesterday (`as_of`).
+
+| Check | Severity | Meaning |
+| --- | --- | --- |
+| `trade_date_mismatch` | warn / info | A timestamp between local and UTC midnight has two candidate dates; the stored close decides which one the price belongs to. `booked_day_before_trade` (warn): Ghostfolio values the trade a day early. `local_date_after_trade` (info): the local date, used for monthly bucketing, is a day late. `ambiguous` (info): the price cannot tell. |
+| `price_far_from_close` | warn | The price is more than 5% from the close on the day Ghostfolio books the trade |
+| `duplicate_activity` | error | Same account, type, asset, local date, quantity, price and fee |
+| `interest_day_conflict` | warn | A daily payer with two payments on one day, usually next to a day with none |
+| `missing_interest_day` / `missing_interest_month` | warn | A gap in a daily or monthly payer's interest (`interest.expected` in `ACCOUNT_PROFILES`) |
+| `cash_without_interest` | info | Cash above 100 with no interest in 190 days |
+| `stale_balance` | info | Cash above 100 and no balance snapshot in 45 days |
+| `stale_price` | warn | A held asset whose last real (not carried-forward) close is over 5 days old |
+| `chart_gap` / `invariant_break` | info / warn | Missing chart days, and invariant breaks outside sell days (see [Monthly Returns](#monthly-returns)) |
+| `legacy_seed_position` | info | A first buy more than 180 days before the next and under 1% of all buys |
+| `mixed_timestamp_styles` | info | One account records the same kind of activity at UTC midnight, local midnight and intraday times |
+| `missing_isin`, `unsupported_activity_type`, `non_base_currency` | info | Data the analytics tools cannot fully interpret |
 
 ## Data Sources
 
