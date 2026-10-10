@@ -36,6 +36,16 @@ ACTIVITIES = [
     },
 ]
 
+# A daily cash-interest series from Apr 1 to Apr 9 with Apr 5 missing.
+ACTIVITIES += [
+    {
+        **ACTIVITIES[1],
+        "id": f"i{day}",
+        "date": f"2026-04-{day:02d}T09:00:00.000Z",
+    }
+    for day in (2, 3, 4, 6, 7, 8, 9)
+]
+
 RESPONSES = {
     "/api/v1/activities/": {"activities": ACTIVITIES, "count": len(ACTIVITIES)},
     "/api/v1/account/": {
@@ -95,7 +105,8 @@ async def test_audit_reads_only_and_reports_findings(fake_ghostfolio):
     assert result["as_of"] == "2026-04-10"
     found = {(f["check"], f["severity"]) for f in result["findings"]}
     assert ("trade_date_mismatch", "warn") in found
-    assert ("missing_interest_day", "warn") in found
+    [missing] = [f for f in result["findings"] if f["check"] == "missing_interest_day"]
+    assert missing["dates"] == ["2026-04-05", "2026-04-10"]
     assert ("missing_isin", "info") in found
     cash = [f for f in result["findings"] if f["check"] == "cash_without_interest"]
     assert [f["account_id"] for f in cash] == ["acc-b"]

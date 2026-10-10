@@ -196,3 +196,18 @@ def test_output_is_byte_identical_and_order_independent():
     second = run(snapshots[::-1], activities[::-1], accounts=(B, A))
 
     assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+
+def test_interest_fees_give_a_net_yield():
+    withheld = interest("i1", "2026-04-20T10:00:00.000Z", 0.04)
+    withheld["feeInBaseCurrency"] = 0.01
+    [month] = run([snap("acc-a", "2026-03-01", 2.0)], [withheld])["months"]
+    row = account_row(month)
+
+    assert row["interest"] == 0.04
+    assert row["interest_fees"] == 0.01
+    assert row["period_yield"] == 0.02
+    assert row["net_period_yield"] == 0.015
+    assert row["net_annualized_yield"] == pytest.approx(0.015 * 365 / 30, abs=1e-8)
+    assert month["total"]["interest_fees"] == 0.01
+    assert month["total"]["net_period_yield"] == 0.015

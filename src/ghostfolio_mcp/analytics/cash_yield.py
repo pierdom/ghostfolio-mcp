@@ -12,6 +12,9 @@ Conventions (``METHOD_VERSION`` changes whenever one of these does):
 - Interest is attributed to months as in ``get_monthly_returns``: by local
   payment date, or under ``accrual`` with each account's
   ``InterestRule.attribution``.
+- ``interest`` is gross; ``interest_fees`` are the fees recorded on the
+  interest activities (typically withholding tax). ``net_*`` yields use
+  ``interest - interest_fees``.
 - ``period_yield = interest / avg_balance`` and
   ``annualized_yield = period_yield * 365 / days`` (simple, ACT/365), where
   ``days`` is the number of days in the period up to ``as_of``. Both are only
@@ -89,25 +92,49 @@ def _daily_balances(
     return balances
 
 
+def _yields(
+    interest: float, interest_fees: float, avg: float | None, days: int
+) -> tuple[dict[str, float | None], dict[str, float | None]]:
+    """Gross and net (after interest fees) period and annualized yields."""
+    if avg is None or avg <= 0:
+        return (
+            {"period_yield": None, "annualized_yield": None},
+            {"net_period_yield": None, "net_annualized_yield": None},
+        )
+    gross = interest / avg
+    net = (interest - interest_fees) / avg
+    return (
+        {
+            "period_yield": ratio(gross),
+            "annualized_yield": ratio(gross * DAYS_PER_YEAR / days),
+        },
+        {
+            "net_period_yield": ratio(net),
+            "net_annualized_yield": ratio(net * DAYS_PER_YEAR / days),
+        },
+    )
+
+
 def _measure(
-    balances: dict[date, float], interest: float, start: date, end: date
+    balances: dict[date, float],
+    interest: float,
+    interest_fees: float,
+    start: date,
+    end: date,
 ) -> dict[str, Any]:
     days = (end - start).days + 1
     covered = len(balances)
     avg = math.fsum(balances.values()) / covered if covered else None
     complete = covered == days
-    if complete and avg and avg > 0:
-        period_yield = interest / avg
-        annualized = period_yield * DAYS_PER_YEAR / days
-    else:
-        period_yield = annualized = None
+    gross, net = _yields(interest, interest_fees, avg if complete else None, days)
     return {
         "days": days,
         "covered_days": covered,
         "avg_balance": money(avg) if avg is not None else None,
         "interest": money(interest),
-        "period_yield": ratio(period_yield),
-        "annualized_yield": ratio(annualized),
+        "interest_fees": money(interest_fees),
+        **gross,
+        **net,
         "_avg": avg,
         "_complete": complete,
     }
@@ -147,12 +174,14 @@ def compute_cash_yield(
         snapshots_by_account[snapshot.account_id].append(snapshot)
 
     interest: dict[tuple[str, str], list[float]] = defaultdict(list)
+    interest_fees: dict[tuple[str, str], list[float]] = defaultdict(list)
     for activity in activities:
         if activity.type != "INTEREST" or activity.local_date > as_of:
             continue
         month = _attributed_month(activity, config)
         if month in months:
             interest[(activity.account_id, month)].append(activity.amount)
+            interest_fees[(activity.account_id, month)].append(activity.fee)
 
     ordered_accounts = sorted(accounts, key=lambda a: a.id)
 
@@ -180,6 +209,7 @@ def compute_cash_yield(
         rows = []
         total_interest: list[float] = []
         total_avg: list[float] = []
+        total_fees: list[float] = []
         # Accounts not covered on every day of the period would set a whole
         # period's interest against part of its balance; they are listed
         # instead of being summed.
@@ -191,9 +221,12 @@ def compute_cash_yield(
             paid = math.fsum(
                 v for m in period_months for v in interest.get((account.id, m), [])
             )
+            withheld = math.fsum(
+                v for m in period_months for v in interest_fees.get((account.id, m), [])
+            )
             if not balances and not paid:
                 continue
-            measured = _measure(balances, paid, start, end)
+            measured = _measure(balances, paid, withheld, start, end)
             rows.append(
                 {
                     "account_id": account.id,
@@ -205,25 +238,24 @@ def compute_cash_yield(
             )
             if measured["_complete"]:
                 total_interest.append(paid)
+                total_fees.append(withheld)
                 total_avg.append(measured["_avg"])
             else:
                 left_out.append(account.id)
         days = (end - start).days + 1
         avg = math.fsum(total_avg)
         paid = math.fsum(total_interest)
-        if avg > 0:
-            period_yield = paid / avg
-            annualized = period_yield * DAYS_PER_YEAR / days
-        else:
-            period_yield = annualized = None
+        withheld = math.fsum(total_fees)
+        gross, net = _yields(paid, withheld, avg, days)
         return {
             "accounts": rows,
             "total": {
                 "days": days,
                 "avg_balance": money(avg),
                 "interest": money(paid),
-                "period_yield": ratio(period_yield),
-                "annualized_yield": ratio(annualized),
+                "interest_fees": money(withheld),
+                **gross,
+                **net,
                 "accounts_left_out": left_out,
             },
         }

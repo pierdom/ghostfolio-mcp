@@ -477,3 +477,113 @@ def test_balance_snapshots_are_parsed_as_dates():
         BalanceSnapshot("acc-a", date(2026, 8, 1), 1.0),
         BalanceSnapshot("acc-a", date(2026, 8, 2), 2.0),
     ]
+
+
+# --- refinements from the live run -------------------------------------------
+
+
+def test_weekend_close_repeating_friday_is_not_a_trading_day():
+    # Ghostfolio fills Sat/Sun with Friday's close without marking it carried
+    # forward; Sunday 2026-03-29 must still not count as a trading day.
+    result = run(
+        [raw("b1", "BUY", "2026-03-29T22:00:00.000Z", unit_price=1.0)],
+        price_map={
+            SECURITY: prices(
+                ("2026-03-27", 1.0),
+                ("2026-03-28", 1.0),
+                ("2026-03-29", 1.0),
+                ("2026-03-30", 1.05),
+                (str(AS_OF), 1.2),
+            )
+        },
+    )
+    [finding] = checks(result, "trade_date_mismatch")
+
+    assert finding["evidence"]["verdict"] == "booked_day_before_trade"
+    assert finding["evidence"]["trading_days"] == ["local"]
+
+
+def test_trades_entered_together_get_one_verdict():
+    batch = "2026-07-23T22:00:00.000Z"
+    price_map = {
+        "YAHOO:A": prices(
+            ("2026-07-22", 0.9), ("2026-07-23", 1.0), ("2026-07-24", 1.05)
+        ),
+        "YAHOO:B": prices(
+            ("2026-07-22", 0.9), ("2026-07-23", 1.0), ("2026-07-24", 1.05)
+        ),
+        "YAHOO:C": prices(
+            ("2026-07-22", 0.9), ("2026-07-23", 1.0), ("2026-07-24", 1.01)
+        ),
+        SECURITY: fresh_prices(),
+    }
+    result = run(
+        [
+            raw("b1", "BUY", batch, symbol="A", unit_price=1.001),
+            raw("b2", "BUY", batch, symbol="B", unit_price=1.002),
+            # On its own this one would point to the local date.
+            raw("b3", "BUY", batch, symbol="C", unit_price=1.009),
+        ],
+        price_map=price_map,
+        isins=dict.fromkeys(price_map, "XX0000000000"),
+    )
+    [finding] = checks(result, "trade_date_mismatch")
+
+    assert finding["activity_ids"] == ["b1", "b2", "b3"]
+    assert finding["evidence"]["verdict"] == "local_date_after_trade"
+    assert finding["security"] is None
+    assert "3 trades entered together" in finding["message"]
+
+
+def test_an_exact_close_decides_even_when_both_are_near():
+    # Fund NAVs: the price equals one day's close exactly; the other day is
+    # only 0.1% away, below the 0.2% gap that would otherwise be needed.
+    result = run(
+        [raw("b1", "BUY", "2026-08-04T22:00:00.000Z", unit_price=1.0)],
+        price_map={
+            SECURITY: prices(
+                ("2026-08-03", 0.9),
+                ("2026-08-04", 1.001),
+                ("2026-08-05", 1.0),
+                (str(AS_OF), 1.2),
+            )
+        },
+    )
+    [finding] = checks(result, "trade_date_mismatch")
+
+    assert finding["evidence"]["verdict"] == "booked_day_before_trade"
+    assert "is this day's close" in finding["message"]
+
+
+def test_daily_cadence_is_judged_per_kind_of_interest():
+    cash = daily_interest("2026-08-01", "2026-08-31", skip=("2026-08-11",))
+    lending = [
+        {
+            **interest(f"l{d}", f"2026-08-{d:02d}T03:00:00.000Z"),
+            "SymbolProfile": {"symbol": "GF_INTEREST-LENDING", "dataSource": "MANUAL"},
+        }
+        for d in (3, 11, 20)  # occasional, and present on the missing cash day
+    ]
+    result = run(
+        [*cash, *lending], interest_rules={"acc-a": InterestRule(expected="daily")}
+    )
+    [missing] = checks(result, "missing_interest_day")
+
+    assert missing["security"] == "MANUAL:GF_INTEREST-CASH"
+    assert missing["dates"] == ["2026-08-11"]
+
+
+def test_stale_price_ignores_repeated_closes():
+    result = run(
+        [raw("b1", "BUY", "2026-07-01T10:00:00.000Z")],
+        price_map={
+            SECURITY: prices(
+                ("2026-08-19", 0.9),
+                ("2026-08-20", 1.0),
+                *((f"2026-08-{d}", 1.0) for d in range(21, 32)),
+            )
+        },
+    )
+    [finding] = checks(result, "stale_price")
+
+    assert finding["dates"] == ["2026-08-20"]

@@ -599,9 +599,10 @@ Definitions, per chart day `d` with netPerformance `NP`, value `V` and total inv
 | Field | Definition |
 | --- | --- |
 | `market_pnl_net` | Σ ΔNP |
-| `fees` | Σ activity fees on the month's chart days |
-| `market_pnl_gross` | `market_pnl_net + fees` |
-| `interest` | Σ INTEREST activities attributed to the month, with `interest_by_account` |
+| `fees` | Σ fees of trades on the month's chart days |
+| `interest_fees` | Σ fees recorded on INTEREST activities (typically withholding tax) on the month's chart days; Ghostfolio subtracts them from netPerformance |
+| `market_pnl_gross` | `market_pnl_net + fees + interest_fees` |
+| `interest` | Σ INTEREST activities (gross) attributed to the month, with `interest_by_account` |
 | `total_gross` | `market_pnl_gross + interest` |
 | `net_flows` | Σ ΔI (buys minus sells, at cost) |
 | flow `F` | `ΔV - ΔNP`: money entering (+) or leaving (-) the securities, at market value, at the start of the day |
@@ -613,7 +614,7 @@ With no flows in a month, `twr` equals `modified_dietz`. If money is earned on z
 
 Flags per month: `partial_month`, `sell_days`, `missing_interest_accounts`, `invariant_breaks`, `chart_gaps`, `boundary_gap` (a missing day across a month boundary, so a delta mixes two months), `calendar_mismatches` and `undefined_return_days`.
 
-The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees = 0` within 0.01. It is expected to break on sell days (execution vs. closing price). A break equal to that day's interest (`hint: matches_interest`) means Ghostfolio started counting interest inside netPerformance. Breaks are reported, never corrected.
+The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees + interest_fees = 0` within 0.01. It is expected to break on sell days (execution vs. closing price). A break equal to that day's interest (`hint: matches_interest`) means Ghostfolio started counting interest inside netPerformance. Breaks are reported, never corrected.
 
 `accrual` applies the per-account interest rules in `ACCOUNT_PROFILES`. Accounts without a rule keep their payment date. Values are rounded only in the output: money to 2 decimals, ratios to 8.
 
@@ -623,11 +624,11 @@ The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees = 0` within 0.01. 
 
 | Check | Severity | Meaning |
 | --- | --- | --- |
-| `trade_date_mismatch` | warn / info | A timestamp between local and UTC midnight has two candidate dates; the stored close decides which one the price belongs to. `booked_day_before_trade` (warn): Ghostfolio values the trade a day early. `local_date_after_trade` (info): the local date, used for monthly bucketing, is a day late. `ambiguous` (info): the price cannot tell. |
+| `trade_date_mismatch` | warn / info | A timestamp between local and UTC midnight has two candidate dates; the stored close decides which one the price belongs to. A day counts as a trading day only if its close is neither carried forward nor a repeat of the day before (Ghostfolio fills weekends with Friday's close). Trades of one account sharing a timestamp are judged together, as one batch. `booked_day_before_trade` (warn): Ghostfolio values the trade a day early. `local_date_after_trade` (info): the local date, used for monthly bucketing, is a day late. `ambiguous` (info): the price cannot tell. |
 | `price_far_from_close` | warn | The price is more than 5% from the close on the day Ghostfolio books the trade |
 | `duplicate_activity` | error | Same account, type, asset, local date, quantity, price and fee |
 | `interest_day_conflict` | warn | A daily payer with two payments on one day, usually next to a day with none |
-| `missing_interest_day` / `missing_interest_month` | warn | A gap in a daily or monthly payer's interest (`interest.expected` in `ACCOUNT_PROFILES`) |
+| `missing_interest_day` / `missing_interest_month` | warn | A gap in a daily or monthly payer's interest (`interest.expected` in `ACCOUNT_PROFILES`). Daily cadence is checked per kind of interest, and only for a kind paid on at least half the days of its span |
 | `cash_without_interest` | info | Cash above 100 with no interest in 190 days |
 | `stale_balance` | info | Cash above 100 and no balance snapshot in 45 days |
 | `stale_price` | warn | A held asset whose last real (not carried-forward) close is over 5 days old |
@@ -641,7 +642,7 @@ The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees = 0` within 0.01. 
 `get_cash_yield` measures what cash actually earns, per account and month, plus a period summary. Inputs match `get_monthly_returns`: `start_month`, `end_month`, `timezone`, `interest_attribution`.
 
 - The balance on a day is the latest balance snapshot on or before it: a balance holds until the next snapshot. `avg_balance` is the mean over the covered days.
-- `period_yield = interest / avg_balance` and `annualized_yield = period_yield × 365 / days` (simple, ACT/365), up to yesterday.
+- `period_yield = interest / avg_balance` and `annualized_yield = period_yield × 365 / days` (simple, ACT/365), up to yesterday. `interest` is gross; `interest_fees` are the fees recorded on the interest activities (typically withholding tax), and `net_period_yield` / `net_annualized_yield` use `interest - interest_fees`.
 - A period not covered by snapshots on every day gets no yield (`partial_coverage`), since a whole month's interest would be set against part of its balance. The portfolio `total` sums only fully covered accounts and names the others in `accounts_left_out`.
 - Flags per account: `history_starts`, `partial_coverage`, `stale_snapshot` (none in 45 days), `max_snapshot_gap_days`, `interest_without_balance`.
 - Every account with balance history is reported, including accounts excluded from analysis (`excluded_from_analysis`).

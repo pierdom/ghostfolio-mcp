@@ -12,8 +12,11 @@ Checks (``METHOD_VERSION`` changes whenever one is added or its rule changes):
   midnight has two candidate dates: Ghostfolio books it on the UTC date, while
   the local date is what a person entering "the 23rd" meant. The stored price
   decides: a candidate is a trading day when its stored close is not carried
-  forward, and the price is attributed to the trading day whose close it is
-  meaningfully nearer to. ``booked_day_before_trade`` (warn) when the price
+  forward nor a repeat of the previous day's close (Ghostfolio fills weekends
+  with the Friday close), and the price is attributed to the trading day
+  whose close it matches or is meaningfully nearer to. Trades of one account
+  sharing a timestamp (an order batch) get one verdict, from their mean
+  distance to each close. ``booked_day_before_trade`` (warn) when the price
   belongs to the local date, so Ghostfolio values the trade a day early;
   ``local_date_after_trade`` (info) when it belongs to the UTC date, so the
   local date - used for monthly bucketing - is a day late.
@@ -25,13 +28,15 @@ Checks (``METHOD_VERSION`` changes whenever one is added or its rule changes):
   payment of the same kind on one local day.
 - ``missing_interest_day`` / ``missing_interest_month`` (warn) - a daily or
   monthly payer (``InterestRule.expected``) with a day or month without
-  interest between its first payment and ``as_of``.
+  interest between its first payment and ``as_of``. Daily cadence is judged
+  per kind of interest (asset): only a kind paid on at least half the days of
+  its span counts as daily, so occasional lending income is not checked.
 - ``cash_without_interest`` (info) - an account holding cash that paid no
   interest within ``interest_window_days``.
 - ``stale_balance`` (info) - an account with a cash balance whose last
   balance snapshot is older than ``stale_balance_days``.
-- ``stale_price`` (warn) - a held asset whose last stored close that is not
-  carried forward is older than ``stale_price_days``.
+- ``stale_price`` (warn) - a held asset whose last real close (not carried
+  forward, not a repeat of the day before) is older than ``stale_price_days``.
 - ``chart_gap`` (info) and ``invariant_break`` (warn) - missing chart days and
   days where ``dNP - (dV - dInvestment) + fees`` is not zero outside sell days,
   as computed by :mod:`monthly_returns`.
@@ -77,6 +82,9 @@ SUPPORTED_ACTIVITY_TYPES = frozenset({"BUY", "SELL", "INTEREST"})
 
 _SEVERITY_RANK = {"error": 0, "warn": 1, "info": 2}
 
+# A kind of interest is only judged daily over at least this many days.
+DAILY_MIN_SPAN_DAYS = 7
+
 
 @dataclass(frozen=True)
 class AccountInfo:
@@ -102,6 +110,8 @@ class AuditConfig:
     # A price nearer one candidate date's close than the other's by at least
     # this share of the close decides the trade date.
     trade_date_min_gap: float = 0.002
+    # A mean distance this small means the price is that day's close.
+    trade_date_exact_gap: float = 0.0005
     price_far_ratio: float = 0.05
     interest_window_days: int = 190
     cash_threshold: float = 100.0
@@ -149,7 +159,21 @@ def _relative_gap(price: float, close: float) -> float:
     return abs(price - close) / close
 
 
-def _check_trade_dates(
+def _is_trading_day(points: Mapping[date, PricePoint], day: date) -> bool:
+    """Whether the stored close for ``day`` is a real close.
+
+    Ghostfolio stores a price for every calendar day and does not always mark
+    weekend and holiday prices as carried forward, so a close identical to the
+    previous day's close also counts as no trading.
+    """
+    point = points.get(day)
+    if point is None or point.carried_forward:
+        return False
+    previous = points.get(day - timedelta(days=1))
+    return previous is None or previous.price != point.price
+
+
+def _check_far_prices(
     activities: list[Activity],
     prices: Mapping[str, list[PricePoint]],
     config: AuditConfig,
@@ -159,91 +183,132 @@ def _check_trade_dates(
         if activity.type not in ("BUY", "SELL") or activity.unit_price <= 0:
             continue
         points = {p.date: p for p in prices.get(activity.security, [])}
-        if not points:
+        if not _is_trading_day(points, activity.chart_date):
             continue
-        evidence: dict[str, Any] = {
-            "unit_price": activity.unit_price,
-            "local_date": activity.local_date.isoformat(),
-            "booked_date": activity.chart_date.isoformat(),
-        }
-        for label, day in (
-            ("local", activity.local_date),
-            ("booked", activity.chart_date),
-        ):
-            point = points.get(day)
-            evidence[f"{label}_close"] = point.price if point else None
-            evidence[f"{label}_close_carried_forward"] = (
-                point.carried_forward if point else None
-            )
-        booked = points.get(activity.chart_date)
-        if (
-            booked
-            and not booked.carried_forward
-            and _relative_gap(activity.unit_price, booked.price)
-            > config.price_far_ratio
-        ):
+        close = points[activity.chart_date].price
+        gap = _relative_gap(activity.unit_price, close)
+        if gap > config.price_far_ratio:
             findings.append(
                 _finding(
                     "price_far_from_close",
                     "warn",
-                    f"{activity.type} price is "
-                    f"{_relative_gap(activity.unit_price, booked.price):.1%} away from "
-                    "the close on the day Ghostfolio books it",
+                    f"{activity.type} price is {gap:.1%} away from the close on the "
+                    "day Ghostfolio books it",
                     dates=[activity.chart_date],
                     activities=[activity],
                     account=(activity.account_id, activity.account_name),
                     security=activity.security,
-                    evidence=evidence,
+                    evidence={"unit_price": activity.unit_price, "close": close},
                 )
             )
-        if activity.local_date == activity.chart_date:
-            continue
-        trading = {
-            label: points[day]
-            for label, day in (
-                ("local", activity.local_date),
-                ("booked", activity.chart_date),
-            )
-            if day in points and not points[day].carried_forward
+    return findings
+
+
+def _check_trade_dates(
+    activities: list[Activity],
+    prices: Mapping[str, list[PricePoint]],
+    config: AuditConfig,
+) -> list[dict[str, Any]]:
+    """Decide the trade date of local-midnight trades, one verdict per batch.
+
+    Trades of one account sharing a timestamp were entered together (an
+    order batch, a savings-plan run), so they are judged together: a
+    candidate date counts only if it is a trading day for every member, and
+    with two candidates the members' mean distance to each close decides.
+    """
+    groups: dict[tuple[str, Any], list[Activity]] = defaultdict(list)
+    for activity in activities:
+        if (
+            activity.type in ("BUY", "SELL")
+            and activity.unit_price > 0
+            and activity.local_date != activity.chart_date
+            and prices.get(activity.security)
+        ):
+            key = (activity.account_id, parse_timestamp(activity.timestamp))
+            groups[key].append(activity)
+
+    findings = []
+    for (_account_id, _timestamp), members in sorted(
+        groups.items(), key=lambda item: (item[0][0], item[0][1])
+    ):
+        members.sort(key=lambda a: a.id)
+        first = members[0]
+        candidates = {"local": first.local_date, "booked": first.chart_date}
+        rows = []
+        trading = {"local": True, "booked": True}
+        gaps: dict[str, list[float]] = {"local": [], "booked": []}
+        for member in members:
+            points = {p.date: p for p in prices[member.security]}
+            row: dict[str, Any] = {
+                "activity_id": member.id,
+                "security": member.security,
+                "unit_price": member.unit_price,
+            }
+            for label, day in candidates.items():
+                point = points.get(day)
+                row[f"{label}_close"] = point.price if point else None
+                if point is not None and _is_trading_day(points, day):
+                    gaps[label].append(_relative_gap(member.unit_price, point.price))
+                else:
+                    trading[label] = False
+            rows.append(row)
+        usable = [label for label in ("local", "booked") if trading[label]]
+        evidence: dict[str, Any] = {
+            "local_date": first.local_date.isoformat(),
+            "booked_date": first.chart_date.isoformat(),
+            "trading_days": usable,
+            "members": rows,
         }
-        if not trading:
+        if not usable:
             continue
-        if len(trading) == 1:
-            [label] = trading
-            reason = "only trading day of the two"
+        if len(usable) == 1:
+            verdict_label = usable[0]
+            reason = "the only trading day of the two"
         else:
-            gap_local = _relative_gap(activity.unit_price, trading["local"].price)
-            gap_booked = _relative_gap(activity.unit_price, trading["booked"].price)
-            if abs(gap_local - gap_booked) < config.trade_date_min_gap:
-                findings.append(
-                    _finding(
-                        "trade_date_mismatch",
-                        "info",
-                        "Timestamp falls between local and UTC midnight and the "
-                        "price does not tell which day the trade was",
-                        dates=[activity.local_date, activity.chart_date],
-                        activities=[activity],
-                        account=(activity.account_id, activity.account_name),
-                        security=activity.security,
-                        evidence={**evidence, "verdict": "ambiguous"},
-                    )
+            mean = {
+                label: math.fsum(gaps[label]) / len(gaps[label]) for label in usable
+            }
+            evidence["mean_gap"] = {label: ratio(mean[label]) for label in usable}
+            nearer = min(usable, key=lambda label: (mean[label], label))
+            other = "booked" if nearer == "local" else "local"
+            if mean[nearer] <= config.trade_date_exact_gap < mean[other]:
+                verdict_label = nearer
+                reason = "the price is this day's close"
+            elif mean[other] - mean[nearer] >= config.trade_date_min_gap:
+                verdict_label = nearer
+                reason = "the price is nearer this day's close"
+            else:
+                verdict_label = None
+                reason = ""
+        securities = sorted({m.security for m in members})
+        common = {
+            "dates": [first.local_date, first.chart_date],
+            "activities": members,
+            "account": (first.account_id, first.account_name),
+            "security": securities[0] if len(securities) == 1 else None,
+        }
+        batch = f" ({len(members)} trades entered together)" if len(members) > 1 else ""
+        if verdict_label is None:
+            findings.append(
+                _finding(
+                    "trade_date_mismatch",
+                    "info",
+                    "Timestamp falls between local and UTC midnight and the price "
+                    f"does not tell which day the trade was{batch}",
+                    evidence={**evidence, "verdict": "ambiguous"},
+                    **common,
                 )
-                continue
-            label = "local" if gap_local < gap_booked else "booked"
-            reason = "price nearer this day's close"
-        if label == "local":
+            )
+        elif verdict_label == "local":
             findings.append(
                 _finding(
                     "trade_date_mismatch",
                     "warn",
-                    f"Traded on {activity.local_date.isoformat()} ({reason}) but "
-                    f"Ghostfolio books it on {activity.chart_date.isoformat()}, a day "
-                    "early, because the timestamp is local midnight",
-                    dates=[activity.local_date, activity.chart_date],
-                    activities=[activity],
-                    account=(activity.account_id, activity.account_name),
-                    security=activity.security,
+                    f"Traded on {first.local_date.isoformat()} ({reason}) but "
+                    f"Ghostfolio books it on {first.chart_date.isoformat()}, a day "
+                    f"early, because the timestamp is local midnight{batch}",
                     evidence={**evidence, "verdict": "booked_day_before_trade"},
+                    **common,
                 )
             )
         else:
@@ -251,14 +316,11 @@ def _check_trade_dates(
                 _finding(
                     "trade_date_mismatch",
                     "info",
-                    f"Traded on {activity.chart_date.isoformat()} ({reason}), as "
+                    f"Traded on {first.chart_date.isoformat()} ({reason}), as "
                     "Ghostfolio books it, but its local date is "
-                    f"{activity.local_date.isoformat()}, a day late",
-                    dates=[activity.local_date, activity.chart_date],
-                    activities=[activity],
-                    account=(activity.account_id, activity.account_name),
-                    security=activity.security,
+                    f"{first.local_date.isoformat()}, a day late{batch}",
                     evidence={**evidence, "verdict": "local_date_after_trade"},
+                    **common,
                 )
             )
     return findings
@@ -293,6 +355,74 @@ def _check_duplicates(activities: list[Activity]) -> list[dict[str, Any]]:
     ]
 
 
+def _check_daily_interest(
+    paid: list[Activity], account: tuple[str, str], as_of: date
+) -> list[dict[str, Any]]:
+    """Conflicts and gaps for each kind of interest the account pays daily.
+
+    An account can pay more than one kind of interest (cash interest daily,
+    lending income now and then), so cadence is checked per asset. A kind is
+    daily when it was paid on at least half of the days from its first to its
+    last payment.
+    """
+    findings = []
+    by_security: dict[str, list[Activity]] = defaultdict(list)
+    for activity in paid:
+        by_security[activity.security].append(activity)
+    for security, payments in sorted(by_security.items()):
+        paid_days = {a.local_date for a in payments}
+        first, last = min(paid_days), max(paid_days)
+        span = (last - first).days + 1
+        if span < DAILY_MIN_SPAN_DAYS or len(paid_days) * 2 < span:
+            continue
+        per_day: dict[date, list[Activity]] = defaultdict(list)
+        for activity in payments:
+            per_day[activity.local_date].append(activity)
+        for day, group in sorted(per_day.items()):
+            if len(group) < 2:
+                continue
+            neighbours = [
+                d
+                for d in (day - timedelta(days=1), day + timedelta(days=1))
+                if d not in paid_days and first <= d <= as_of
+            ]
+            findings.append(
+                _finding(
+                    "interest_day_conflict",
+                    "warn",
+                    f"{len(group)} payments on one day from a daily payer"
+                    + (
+                        f"; {neighbours[0].isoformat()} next to it has none, so "
+                        "one is probably misdated"
+                        if neighbours
+                        else ""
+                    ),
+                    dates=[day, *neighbours],
+                    activities=group,
+                    account=account,
+                    security=security,
+                    evidence={"amounts": [money(a.amount) for a in group]},
+                )
+            )
+        missing = [
+            first + timedelta(days=i)
+            for i in range((as_of - first).days + 1)
+            if first + timedelta(days=i) not in paid_days
+        ]
+        if missing:
+            findings.append(
+                _finding(
+                    "missing_interest_day",
+                    "warn",
+                    f"{len(missing)} day(s) without this daily payment",
+                    dates=missing,
+                    account=account,
+                    security=security,
+                )
+            )
+    return findings
+
+
 def _check_interest(
     activities: list[Activity],
     accounts: Mapping[str, AccountInfo],
@@ -311,52 +441,7 @@ def _check_interest(
             continue
         name = paid[0].account_name
         if rule.expected == "daily":
-            per_day: dict[tuple[date, str], list[Activity]] = defaultdict(list)
-            for activity in paid:
-                per_day[(activity.local_date, activity.security)].append(activity)
-            paid_days = {activity.local_date for activity in paid}
-            for (day, security), group in sorted(per_day.items()):
-                if len(group) < 2:
-                    continue
-                neighbours = [
-                    d
-                    for d in (day - timedelta(days=1), day + timedelta(days=1))
-                    if d not in paid_days and d <= as_of
-                ]
-                findings.append(
-                    _finding(
-                        "interest_day_conflict",
-                        "warn",
-                        f"{len(group)} interest payments on one day"
-                        + (
-                            f"; {neighbours[0].isoformat()} next to it has none, so "
-                            "one is probably misdated"
-                            if neighbours
-                            else ""
-                        ),
-                        dates=[day, *neighbours],
-                        activities=group,
-                        account=(account_id, name),
-                        security=security,
-                        evidence={"amounts": [money(a.amount) for a in group]},
-                    )
-                )
-            first = min(paid_days)
-            missing = [
-                first + timedelta(days=i)
-                for i in range((as_of - first).days + 1)
-                if first + timedelta(days=i) not in paid_days
-            ]
-            if missing:
-                findings.append(
-                    _finding(
-                        "missing_interest_day",
-                        "warn",
-                        f"{len(missing)} day(s) without interest from a daily payer",
-                        dates=missing,
-                        account=(account_id, name),
-                    )
-                )
+            findings.extend(_check_daily_interest(paid, (account_id, name), as_of))
         elif rule.expected == "monthly":
             paid_months = {month_of(a.local_date) for a in paid}
             last_complete = shift_month(month_of(as_of), -1)
@@ -466,7 +551,8 @@ def _check_prices(
         position = math.fsum(held[security])
         if position <= 1e-9:
             continue
-        real = [p.date for p in prices.get(security, []) if not p.carried_forward]
+        points = {p.date: p for p in prices.get(security, [])}
+        real = [day for day in points if _is_trading_day(points, day)]
         latest = max(real, default=None)
         age = (as_of - latest).days if latest else None
         if age is not None and age <= config.stale_price_days:
@@ -676,6 +762,7 @@ def audit_portfolio(
     known = [a for a in activities if a.local_date <= as_of]
     findings = [
         *_check_duplicates(known),
+        *_check_far_prices(known, prices, config),
         *_check_trade_dates(known, prices, config),
         *_check_interest(known, by_id, config, as_of),
         *_check_balances(by_id, snapshots, config, as_of),
@@ -709,6 +796,7 @@ def audit_portfolio(
             },
             "thresholds": {
                 "trade_date_min_gap": config.trade_date_min_gap,
+                "trade_date_exact_gap": config.trade_date_exact_gap,
                 "price_far_ratio": config.price_far_ratio,
                 "interest_window_days": config.interest_window_days,
                 "cash_threshold": config.cash_threshold,
