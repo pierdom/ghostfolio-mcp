@@ -13,12 +13,16 @@ Conventions (``METHOD_VERSION`` changes whenever one of these does):
   server calendar (``chart_timezone``, UTC by default), and a chart delta cannot
   be re-split after the fact. So everything derived from the chart - net P&L,
   flows, TWR, Modified Dietz - is bucketed by chart row date, and fees are
-  mapped onto the same chart days so that ``market_pnl_gross = net + fees``
-  stays consistent. Everything reported per activity - interest, sell days,
+  mapped onto the same chart days so that
+  ``market_pnl_gross = net + fees + interest_fees`` stays consistent. Everything reported per activity - interest, sell days,
   the per-account breakdown - is bucketed by the activity's date in
   ``timezone``. Activities whose two months differ are listed in
   ``calendar_mismatches``.
 - Daily P&L is ``dNP`` (netPerformance, net of fees, excluding interest).
+  Ghostfolio subtracts the fee of every activity from netPerformance,
+  including a fee on interest (typically withholding tax); that one is
+  reported as ``interest_fees``, apart from trading ``fees``, and both are
+  added back in ``market_pnl_gross``. ``interest`` is gross.
 - Daily external flow is ``F = dV - dNP``: the money that entered or left the
   securities sleeve, valued at market. On ordinary days that equals
   ``dInvestment + fees``; on a sell day it also carries the difference between
@@ -75,7 +79,7 @@ __all__ = [
     "parse_chart",
 ]
 
-METHOD_VERSION = "monthly-returns/1"
+METHOD_VERSION = "monthly-returns/2"
 
 SUPPORTED_ACTIVITY_TYPES = frozenset({"BUY", "SELL", "INTEREST"})
 
@@ -223,13 +227,17 @@ def compute_monthly_returns(
             return None
         return day_dates[bisect_left(day_dates, activity.chart_date)]
 
-    # Activities stop at the last chart row: anything later is not reflected
-    # in the chart this result is computed from.
+    # Activities stop at the last row of the chart response (not of the
+    # requested window): anything later is not reflected in the data this
+    # result is computed from, while a payment after the window can still be
+    # attributed to it under accrual.
+    data_end = rows[-1].date
     known = [
-        a for a in activities if a.local_date <= last_date and a.chart_date <= last_date
+        a for a in activities if a.local_date <= data_end and a.chart_date <= data_end
     ]
 
     fees_by_day: dict[date, list[float]] = defaultdict(list)
+    interest_fees_by_day: dict[date, list[float]] = defaultdict(list)
     interest_by_day: dict[date, list[float]] = defaultdict(list)
     sells_by_day: set[date] = set()
     calendar_mismatches: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -238,7 +246,13 @@ def compute_monthly_returns(
         if bucket is None:
             continue
         if activity.fee:
-            fees_by_day[bucket].append(activity.fee)
+            # Ghostfolio subtracts a fee on any activity from netPerformance;
+            # on interest it is typically a withholding tax, kept apart from
+            # trading fees.
+            target = (
+                interest_fees_by_day if activity.type == "INTEREST" else fees_by_day
+            )
+            target[bucket].append(activity.fee)
         if activity.type == "INTEREST":
             interest_by_day[bucket].append(activity.amount)
         if activity.type == "SELL":
@@ -258,7 +272,9 @@ def compute_monthly_returns(
 
     breaks_by_month: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for day in days:
-        fees = math.fsum(fees_by_day.get(day.date, []))
+        fees = math.fsum(
+            [*fees_by_day.get(day.date, []), *interest_fees_by_day.get(day.date, [])]
+        )
         residual = math.fsum([day.d_np, -day.d_value, day.d_investment, fees])
         if abs(residual) <= tolerance:
             continue
@@ -330,6 +346,10 @@ def compute_monthly_returns(
         fees = math.fsum(
             fee for day in month_days for fee in fees_by_day.get(day.date, [])
         )
+        interest_fees = math.fsum(
+            fee for day in month_days for fee in interest_fees_by_day.get(day.date, [])
+        )
+        market_pnl_gross = math.fsum([market_pnl_net, fees, interest_fees])
         per_account = interest_by_month.get(month, {})
         interest = math.fsum(v for amounts in per_account.values() for v in amounts)
         opening = month_days[0].prev_value if month_days else 0.0
@@ -340,10 +360,11 @@ def compute_monthly_returns(
                 "month": month,
                 "market_pnl_net": money(market_pnl_net),
                 "fees": money(fees),
-                "market_pnl_gross": money(market_pnl_net + fees),
+                "interest_fees": money(interest_fees),
+                "market_pnl_gross": money(market_pnl_gross),
                 "interest": money(interest),
                 "interest_by_account": interest_breakdown(per_account),
-                "total_gross": money(math.fsum([market_pnl_net, fees, interest])),
+                "total_gross": money(math.fsum([market_pnl_gross, interest])),
                 "net_flows": money(math.fsum(d.d_investment for d in month_days)),
                 "avg_invested_capital": money(avg_capital),
                 "twr": ratio(twr),
@@ -373,6 +394,10 @@ def compute_monthly_returns(
     period_fees = math.fsum(
         fee for day in period_days for fee in fees_by_day.get(day.date, [])
     )
+    period_interest_fees = math.fsum(
+        fee for day in period_days for fee in interest_fees_by_day.get(day.date, [])
+    )
+    period_gross = math.fsum([period_net, period_fees, period_interest_fees])
     period_interest = math.fsum(v for amounts in all_interest.values() for v in amounts)
     period_capital, period_dietz = _dietz(
         period_days, window_start, period_end, baseline.value
@@ -404,10 +429,11 @@ def compute_monthly_returns(
         "summary": {
             "market_pnl_net": money(period_net),
             "fees": money(period_fees),
-            "market_pnl_gross": money(period_net + period_fees),
+            "interest_fees": money(period_interest_fees),
+            "market_pnl_gross": money(period_gross),
             "interest": money(period_interest),
             "interest_by_account": interest_breakdown(all_interest),
-            "total_gross": money(math.fsum([period_net, period_fees, period_interest])),
+            "total_gross": money(math.fsum([period_gross, period_interest])),
             "net_flows": money(math.fsum(d.d_investment for d in period_days)),
             "avg_invested_capital": money(period_capital),
             "twr": ratio(period_twr),

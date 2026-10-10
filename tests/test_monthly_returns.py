@@ -443,3 +443,44 @@ def test_output_is_byte_identical_and_order_independent():
     second = run(chart[::-1], activities[::-1], end="2026-05", interest_rules=rules)
 
     assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+
+# --- regressions -------------------------------------------------------------
+
+
+def test_accrual_payment_after_the_window_counts_when_the_chart_reaches_it():
+    # The chart runs to May 31 but only April is requested; the May 1 payment
+    # for April must still be attributed to April.
+    chart = build_chart("2026-03-31", flat_days(61))
+    [april] = run(
+        chart,
+        [activity("m1", "INTEREST", "2026-04-30T22:00:00.000Z", 0.04, account="acc-m")],
+        start="2026-04",
+        end="2026-04",
+        interest_attribution="accrual",
+        interest_rules={"acc-m": InterestRule(attribution="previous_month")},
+    )["months"]
+
+    assert april["interest"] == 0.04
+    assert april["flags"]["missing_interest_accounts"] == []
+
+
+def test_fee_on_interest_is_reported_apart_and_keeps_the_invariant():
+    # Ghostfolio subtracts a fee on interest (withholding tax) from
+    # netPerformance; value is unaffected because it excludes cash.
+    moves = flat_days(30)
+    moves[9] = (-0.02, 0.0, 0.0)
+    chart = build_chart("2026-03-31", moves)
+    for row in chart[10:]:
+        row["valueWithCurrencyEffect"] += 0.02  # value is unaffected
+    withholding = activity("i1", "INTEREST", "2026-04-10T10:00:00.000Z", 0.08)
+    withholding["feeInBaseCurrency"] = 0.02
+    [month] = run(chart, [withholding])["months"]
+
+    assert month["flags"]["invariant_breaks"] == []
+    assert month["market_pnl_net"] == -0.02
+    assert month["fees"] == 0.0
+    assert month["interest_fees"] == 0.02
+    assert month["market_pnl_gross"] == 0.0
+    assert month["interest"] == 0.08
+    assert month["total_gross"] == 0.08
