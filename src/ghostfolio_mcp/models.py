@@ -11,10 +11,35 @@ class InterestRuleConfig(BaseModel):
         "payment_date",
         description="Month interest is attributed to under 'accrual' attribution",
     )
-    expected: Literal["none", "monthly"] = Field(
+    expected: Literal["none", "daily", "monthly"] = Field(
         "none",
-        description="'monthly' flags months in which the account paid no interest",
+        description="Known payment cadence; a day or month without interest is flagged",
     )
+
+
+class TaxProfile(BaseModel):
+    """Per-account tax settings, used by get_realized_gains."""
+
+    excluded: bool = Field(
+        False,
+        description="Leave the account out of capital gains (e.g. a pension plan)",
+    )
+
+
+class Modelo720Profile(BaseModel):
+    """Per-account Modelo 720 settings, used by get_modelo720_inputs."""
+
+    foreign: bool = Field(
+        False, description="The account is held abroad and counts for Modelo 720"
+    )
+
+
+class AccountProfile(BaseModel):
+    """Everything the analytics tools need to know about one account."""
+
+    interest: InterestRuleConfig = Field(default_factory=InterestRuleConfig)
+    tax: TaxProfile = Field(default_factory=TaxProfile)
+    modelo720: Modelo720Profile = Field(default_factory=Modelo720Profile)
 
 
 class GhostfolioConfig(BaseModel):
@@ -46,9 +71,13 @@ class GhostfolioConfig(BaseModel):
         ge=1,
         description="Maximum number of tools returned by search_tools",
     )
-    interest_rules: dict[str, InterestRuleConfig] = Field(
+    account_profiles: dict[str, AccountProfile] = Field(
         default_factory=dict,
-        description="Interest attribution rules keyed by Ghostfolio account ID",
+        description="Per-account analytics settings keyed by Ghostfolio account ID",
+    )
+    default_benchmark: str | None = Field(
+        None,
+        description="Benchmark as DATASOURCE:SYMBOL when a tool is not given one",
     )
 
 

@@ -55,8 +55,7 @@ def register_market_data_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             # served from asset/<dataSource>/<symbol>. Writing market data is
             # still POST market-data/<dataSource>/<symbol>.
             return await client.get(
-                f"asset/{quote_path_segment(data_source)}"
-                f"/{quote_path_segment(symbol)}"
+                f"asset/{quote_path_segment(data_source)}/{quote_path_segment(symbol)}"
             )
 
     @mcp.tool(

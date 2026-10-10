@@ -70,7 +70,7 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
                 default="payment_date",
                 description=(
                     "'payment_date' books interest in the month it was paid; "
-                    "'accrual' applies the per-account rules from INTEREST_RULES"
+                    "'accrual' applies the per-account interest rules from ACCOUNT_PROFILES"
                 ),
             ),
         ] = "payment_date",
@@ -108,9 +108,10 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             interest_attribution=interest_attribution,
             interest_rules={
                 account_id: InterestRule(
-                    attribution=rule.attribution, expected=rule.expected
+                    attribution=profile.interest.attribution,
+                    expected=profile.interest.expected,
                 )
-                for account_id, rule in config.interest_rules.items()
+                for account_id, profile in config.account_profiles.items()
             },
         )
         try:

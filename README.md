@@ -167,11 +167,22 @@ TOOL_SEARCH_STRATEGY=bm25
 # Maximum number of tools returned by search_tools
 TOOL_SEARCH_MAX_RESULTS=5
 
-# Interest Attribution (Optional, used by get_monthly_returns)
-# JSON object keyed by Ghostfolio account ID. "previous_month" books a payment
-# in the month before its payment date under interest_attribution=accrual;
-# "expected": "monthly" flags months without interest from that account.
+# Account Profiles (Optional, used by the analytics tools)
+# JSON object keyed by Ghostfolio account ID; every section is optional.
+#   interest.attribution: "payment_date" (default) or "previous_month" - the
+#     month a payment is booked in under interest_attribution=accrual
+#   interest.expected: "none" (default), "daily" or "monthly" - the known
+#     payment cadence; days or months without interest are flagged
+#   tax.excluded: true leaves the account out of realized gains (e.g. a pension plan)
+#   modelo720.foreign: true counts the account for Modelo 720
+# ACCOUNT_PROFILES={"<account-id>": {"interest": {"attribution": "previous_month", "expected": "monthly"}, "modelo720": {"foreign": true}}}
+# INTEREST_RULES (older) is still read and fills the interest section of
+# accounts whose ACCOUNT_PROFILES entry has none.
 # INTEREST_RULES={"<account-id>": {"attribution": "previous_month", "expected": "monthly"}}
+
+# Benchmark used when a tool call does not name one (DATASOURCE:SYMBOL).
+# Falls back to the benchmark selected in the Ghostfolio user settings.
+# DEFAULT_BENCHMARK=YAHOO:VWCE.DE
 
 # Sentry Error Tracking (Optional)
 # Set SENTRY_DSN to enable error tracking and performance monitoring
@@ -600,7 +611,7 @@ Flags per month: `partial_month`, `sell_days`, `missing_interest_accounts`, `inv
 
 The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees = 0` within 0.01. It is expected to break on sell days (execution vs. closing price). A break equal to that day's interest (`hint: matches_interest`) means Ghostfolio started counting interest inside netPerformance. Breaks are reported, never corrected.
 
-`accrual` applies the per-account rules in `INTEREST_RULES`. Accounts without a rule keep their payment date. Values are rounded only in the output: money to 2 decimals, ratios to 8.
+`accrual` applies the per-account interest rules in `ACCOUNT_PROFILES`. Accounts without a rule keep their payment date. Values are rounded only in the output: money to 2 decimals, ratios to 8.
 
 ## Data Sources
 

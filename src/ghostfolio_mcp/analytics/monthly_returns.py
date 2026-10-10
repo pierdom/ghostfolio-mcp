@@ -38,22 +38,42 @@ Conventions (``METHOD_VERSION`` changes whenever one of these does):
 """
 
 import math
-import re
 from bisect import bisect_left
 from collections import defaultdict
-from collections.abc import Iterable
 from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import date
-from datetime import datetime
 from datetime import timedelta
-from decimal import ROUND_HALF_EVEN
-from decimal import Decimal
 from itertools import pairwise
 from typing import Any
 from typing import Literal
-from zoneinfo import ZoneInfo
+
+from ghostfolio_mcp.analytics.common import Activity
+from ghostfolio_mcp.analytics.common import ChartRow
+from ghostfolio_mcp.analytics.common import InterestRule
+from ghostfolio_mcp.analytics.common import money
+from ghostfolio_mcp.analytics.common import month_end
+from ghostfolio_mcp.analytics.common import month_key
+from ghostfolio_mcp.analytics.common import month_of
+from ghostfolio_mcp.analytics.common import month_start
+from ghostfolio_mcp.analytics.common import months_between
+from ghostfolio_mcp.analytics.common import parse_activities
+from ghostfolio_mcp.analytics.common import parse_chart
+from ghostfolio_mcp.analytics.common import ratio
+from ghostfolio_mcp.analytics.common import shift_month
+
+__all__ = [
+    "METHOD_VERSION",
+    "Activity",
+    "ChartRow",
+    "InterestRule",
+    "ReturnsConfig",
+    "compute_monthly_returns",
+    "month_start",
+    "parse_activities",
+    "parse_chart",
+]
 
 METHOD_VERSION = "monthly-returns/1"
 
@@ -62,51 +82,7 @@ SUPPORTED_ACTIVITY_TYPES = frozenset({"BUY", "SELL", "INTEREST"})
 # Capital at work at or below this is treated as no capital at all.
 _ZERO_CAPITAL = 0.01
 
-_MONTH_PATTERN = re.compile(r"\d{4}-\d{2}")
-
-_MONEY = Decimal("0.01")
-_RATIO = Decimal("0.00000001")
-
 InterestAttribution = Literal["payment_date", "accrual"]
-
-
-@dataclass(frozen=True)
-class ChartRow:
-    """One daily row of the Ghostfolio v2 performance chart, in base currency."""
-
-    date: date
-    net_performance: float
-    value: float
-    total_investment: float
-
-
-@dataclass(frozen=True)
-class Activity:
-    """A Ghostfolio activity with its date resolved on both calendars."""
-
-    id: str
-    type: str
-    account_id: str
-    account_name: str
-    symbol: str
-    local_date: date
-    chart_date: date
-    amount: float
-    fee: float
-
-
-@dataclass(frozen=True)
-class InterestRule:
-    """How one account's interest is attributed under ``accrual``.
-
-    ``attribution="previous_month"`` moves a payment into the month before its
-    payment date (an account that pays on the 1st for the month just ended).
-    ``expected="monthly"`` makes a month without any interest from the account
-    show up in ``missing_interest_accounts``.
-    """
-
-    attribution: Literal["payment_date", "previous_month"] = "payment_date"
-    expected: Literal["none", "monthly"] = "none"
 
 
 @dataclass(frozen=True)
@@ -138,128 +114,13 @@ class _Day:
         return self.prev_value + self.flow
 
 
-def parse_chart(raw_chart: Iterable[Mapping[str, Any]]) -> list[ChartRow]:
-    """Parse ``chart`` rows of ``GET /api/v2/portfolio/performance``.
-
-    Uses the base-currency (``...WithCurrencyEffect``) fields. Rows must have
-    unique dates; they are returned sorted by date.
-    """
-    rows = [
-        ChartRow(
-            date=date.fromisoformat(row["date"][:10]),
-            net_performance=float(row["netPerformanceWithCurrencyEffect"]),
-            value=float(row["valueWithCurrencyEffect"]),
-            total_investment=float(row["totalInvestmentValueWithCurrencyEffect"]),
-        )
-        for row in raw_chart
-    ]
-    rows.sort(key=lambda row: row.date)
-    for prev, cur in pairwise(rows):
-        if prev.date == cur.date:
-            raise ValueError(f"Duplicate chart date {cur.date.isoformat()}")
-    return rows
-
-
-def _parse_timestamp(value: str) -> datetime:
-    timestamp = datetime.fromisoformat(value)
-    if timestamp.tzinfo is None:
-        raise ValueError(f"Activity timestamp without a UTC offset: {value!r}")
-    return timestamp
-
-
-def parse_activities(
-    raw_activities: Iterable[Mapping[str, Any]],
-    timezone: str,
-    chart_timezone: str,
-) -> list[Activity]:
-    """Parse ``activities`` of ``GET /api/v1/activities``.
-
-    Each timestamp is converted to both ``timezone`` and ``chart_timezone``
-    before its date is taken - never sliced or shifted by a fixed offset.
-    """
-    local_tz = ZoneInfo(timezone)
-    chart_tz = ZoneInfo(chart_timezone)
-    activities = []
-    for raw in raw_activities:
-        timestamp = _parse_timestamp(raw["date"])
-        account = raw.get("account") or {}
-        profile = raw.get("SymbolProfile") or {}
-        activities.append(
-            Activity(
-                id=str(raw["id"]),
-                type=str(raw["type"]),
-                account_id=str(raw.get("accountId") or account.get("id") or ""),
-                account_name=str(account.get("name") or ""),
-                symbol=str(profile.get("symbol") or ""),
-                local_date=timestamp.astimezone(local_tz).date(),
-                chart_date=timestamp.astimezone(chart_tz).date(),
-                amount=float(raw["valueInBaseCurrency"]),
-                fee=float(raw.get("feeInBaseCurrency") or 0),
-            )
-        )
-    activities.sort(key=lambda activity: (activity.local_date, activity.id))
-    return activities
-
-
-def _month_key(value: str) -> tuple[int, int]:
-    return month_start(value).year, month_start(value).month
-
-
-def _month_of(day: date) -> str:
-    return f"{day.year:04d}-{day.month:02d}"
-
-
-def month_start(month: str) -> date:
-    """The first day of a YYYY-MM month; ValueError on anything else."""
-    if not _MONTH_PATTERN.fullmatch(month):
-        raise ValueError(f"Expected a month as YYYY-MM, got {month!r}")
-    return date.fromisoformat(f"{month}-01")
-
-
-def _first_day(month: str) -> date:
-    return month_start(month)
-
-
-def _last_day(month: str) -> date:
-    first = _first_day(month)
-    following = date(first.year + first.month // 12, first.month % 12 + 1, 1)
-    return following - timedelta(days=1)
-
-
-def _shift_month(month: str, delta: int) -> str:
-    year, number = _month_key(month)
-    index = year * 12 + (number - 1) + delta
-    return f"{index // 12:04d}-{index % 12 + 1:02d}"
-
-
-def _months(start_month: str, end_month: str) -> list[str]:
-    months = [start_month]
-    while months[-1] != end_month:
-        months.append(_shift_month(months[-1], 1))
-    return months
-
-
-def _money(value: float) -> float:
-    return _round(value, _MONEY)
-
-
-def _ratio(value: float | None) -> float | None:
-    return None if value is None else _round(value, _RATIO)
-
-
-def _round(value: float, quantum: Decimal) -> float:
-    # repr() is the shortest string that round-trips the float, so the result
-    # depends only on the value; + 0.0 folds -0.0 into 0.0.
-    return float(Decimal(repr(value)).quantize(quantum, rounding=ROUND_HALF_EVEN)) + 0.0
-
-
 def _interest_month(activity: Activity, config: ReturnsConfig) -> str:
-    month = _month_of(activity.local_date)
+    month = month_of(activity.local_date)
     if config.interest_attribution != "accrual":
         return month
     rule = config.interest_rules.get(activity.account_id, InterestRule())
     if rule.attribution == "previous_month":
-        return _shift_month(month, -1)
+        return shift_month(month, -1)
     return month
 
 
@@ -319,7 +180,7 @@ def compute_monthly_returns(
         ValueError: On malformed months, or when the chart has no row before
             ``start_month`` to measure the first day against.
     """
-    if _month_key(start_month) > _month_key(end_month):
+    if month_key(start_month) > month_key(end_month):
         raise ValueError("start_month must not be after end_month")
     tolerance = config.invariant_tolerance
 
@@ -328,8 +189,8 @@ def compute_monthly_returns(
         dropped = [r.date.isoformat() for r in rows if r.date > last_complete_date]
         rows = [r for r in rows if r.date <= last_complete_date]
 
-    window_start = _first_day(start_month)
-    requested_end = _last_day(end_month)
+    window_start = month_start(start_month)
+    requested_end = month_end(end_month)
     baseline_index = bisect_left([r.date for r in rows], window_start) - 1
     if baseline_index < 0:
         raise ValueError(
@@ -341,7 +202,7 @@ def compute_monthly_returns(
     if len(scope) < 2:
         raise ValueError(f"The chart has no rows in {start_month}..{end_month}")
     last_date = scope[-1].date
-    months = _months(start_month, min(end_month, _month_of(last_date)))
+    months = months_between(start_month, min(end_month, month_of(last_date)))
 
     days = [
         _Day(
@@ -383,8 +244,8 @@ def compute_monthly_returns(
         if activity.type == "SELL":
             sells_by_day.add(bucket)
         if activity.type in ("BUY", "SELL") or activity.fee:
-            local_month = _month_of(activity.local_date)
-            chart_month = _month_of(bucket)
+            local_month = month_of(activity.local_date)
+            chart_month = month_of(bucket)
             if local_month != chart_month:
                 calendar_mismatches[chart_month].append(
                     {
@@ -408,8 +269,8 @@ def compute_monthly_returns(
             hint = "matches_interest"
         else:
             hint = "unexplained"
-        breaks_by_month[_month_of(day.date)].append(
-            {"date": day.date.isoformat(), "residual": _money(residual), "hint": hint}
+        breaks_by_month[month_of(day.date)].append(
+            {"date": day.date.isoformat(), "residual": money(residual), "hint": hint}
         )
 
     gaps_by_month: dict[str, list[str]] = defaultdict(list)
@@ -418,10 +279,10 @@ def compute_monthly_returns(
         missing = day.prev_date + timedelta(days=1)
         if missing == day.date:
             continue
-        if _month_of(missing) != _month_of(day.date):
-            boundary_gaps.update({_month_of(missing), _month_of(day.date)})
+        if month_of(missing) != month_of(day.date):
+            boundary_gaps.update({month_of(missing), month_of(day.date)})
         while missing < day.date:
-            gaps_by_month[_month_of(missing)].append(missing.isoformat())
+            gaps_by_month[month_of(missing)].append(missing.isoformat())
             missing += timedelta(days=1)
 
     interest_by_month: dict[str, dict[str, list[float]]] = defaultdict(
@@ -431,7 +292,7 @@ def compute_monthly_returns(
     sell_days_by_month: dict[str, set[str]] = defaultdict(set)
     unsupported: dict[str, int] = defaultdict(int)
     for activity in known:
-        local_month = _month_of(activity.local_date)
+        local_month = month_of(activity.local_date)
         if activity.type == "INTEREST":
             month = _interest_month(activity, config)
             if month in months:
@@ -447,7 +308,7 @@ def compute_monthly_returns(
     expected_monthly = sorted(
         account_id
         for account_id, rule in config.interest_rules.items()
-        if rule.expected == "monthly"
+        if rule.expected in ("daily", "monthly")
     )
 
     def interest_breakdown(per_account: Mapping[str, list[float]]) -> list[dict]:
@@ -455,15 +316,15 @@ def compute_monthly_returns(
             {
                 "account_id": account_id,
                 "account_name": account_names.get(account_id, ""),
-                "interest": _money(math.fsum(per_account[account_id])),
+                "interest": money(math.fsum(per_account[account_id])),
             }
             for account_id in sorted(per_account)
         ]
 
     month_rows = []
     for month in months:
-        month_days = [day for day in days if _month_of(day.date) == month]
-        first, last = _first_day(month), _last_day(month)
+        month_days = [day for day in days if month_of(day.date) == month]
+        first, last = month_start(month), month_end(month)
         covered_end = min(last, last_date)
         market_pnl_net = math.fsum(day.d_np for day in month_days)
         fees = math.fsum(
@@ -477,16 +338,16 @@ def compute_monthly_returns(
         month_rows.append(
             {
                 "month": month,
-                "market_pnl_net": _money(market_pnl_net),
-                "fees": _money(fees),
-                "market_pnl_gross": _money(market_pnl_net + fees),
-                "interest": _money(interest),
+                "market_pnl_net": money(market_pnl_net),
+                "fees": money(fees),
+                "market_pnl_gross": money(market_pnl_net + fees),
+                "interest": money(interest),
                 "interest_by_account": interest_breakdown(per_account),
-                "total_gross": _money(math.fsum([market_pnl_net, fees, interest])),
-                "net_flows": _money(math.fsum(d.d_investment for d in month_days)),
-                "avg_invested_capital": _money(avg_capital),
-                "twr": _ratio(twr),
-                "modified_dietz": _ratio(dietz),
+                "total_gross": money(math.fsum([market_pnl_net, fees, interest])),
+                "net_flows": money(math.fsum(d.d_investment for d in month_days)),
+                "avg_invested_capital": money(avg_capital),
+                "twr": ratio(twr),
+                "modified_dietz": ratio(dietz),
                 "flags": {
                     "partial_month": covered_end < last,
                     "sell_days": sorted(sell_days_by_month.get(month, set())),
@@ -502,8 +363,8 @@ def compute_monthly_returns(
             }
         )
 
-    period_days = [day for day in days if _month_of(day.date) in months]
-    period_end = min(_last_day(months[-1]), last_date)
+    period_days = [day for day in days if month_of(day.date) in months]
+    period_end = min(month_end(months[-1]), last_date)
     all_interest: dict[str, list[float]] = defaultdict(list)
     for month in months:
         for account_id, amounts in interest_by_month.get(month, {}).items():
@@ -541,20 +402,18 @@ def compute_monthly_returns(
         },
         "months": month_rows,
         "summary": {
-            "market_pnl_net": _money(period_net),
-            "fees": _money(period_fees),
-            "market_pnl_gross": _money(period_net + period_fees),
-            "interest": _money(period_interest),
+            "market_pnl_net": money(period_net),
+            "fees": money(period_fees),
+            "market_pnl_gross": money(period_net + period_fees),
+            "interest": money(period_interest),
             "interest_by_account": interest_breakdown(all_interest),
-            "total_gross": _money(
-                math.fsum([period_net, period_fees, period_interest])
-            ),
-            "net_flows": _money(math.fsum(d.d_investment for d in period_days)),
-            "avg_invested_capital": _money(period_capital),
-            "twr": _ratio(period_twr),
-            "modified_dietz": _ratio(period_dietz),
+            "total_gross": money(math.fsum([period_net, period_fees, period_interest])),
+            "net_flows": money(math.fsum(d.d_investment for d in period_days)),
+            "avg_invested_capital": money(period_capital),
+            "twr": ratio(period_twr),
+            "modified_dietz": ratio(period_dietz),
             "flags": {
-                "partial_period": period_end < _last_day(end_month),
+                "partial_period": period_end < month_end(end_month),
                 "invariant_break_count": sum(len(v) for v in breaks_by_month.values()),
                 "unsupported_activities": dict(sorted(unsupported.items())),
                 "undefined_return_days": period_undefined,

@@ -14,7 +14,7 @@ from fastmcp.exceptions import ToolError
 
 from ghostfolio_mcp import ghostfolio_client as client_module
 from ghostfolio_mcp.ghostfolio_client import GhostfolioClient
-from ghostfolio_mcp.ghostfolio_client import get_ghostfolio_config_from_env
+from ghostfolio_mcp.models import AccountProfile
 from ghostfolio_mcp.models import GhostfolioConfig
 from ghostfolio_mcp.models import InterestRuleConfig
 from ghostfolio_mcp.tools import analytics as analytics_module
@@ -59,9 +59,11 @@ def server(monkeypatch):
     config = GhostfolioConfig(
         ghostfolio_url=BASE_URL,
         token="api-token",
-        interest_rules={
-            "acc-a": InterestRuleConfig(
-                attribution="previous_month", expected="monthly"
+        account_profiles={
+            "acc-a": AccountProfile(
+                interest=InterestRuleConfig(
+                    attribution="previous_month", expected="monthly"
+                )
             )
         },
     )
@@ -195,31 +197,3 @@ async def test_bad_arguments_are_refused_before_any_request(server, arguments, m
     with pytest.raises(ToolError, match=message):
         await call(mcp, arguments)
     assert requests == []
-
-
-def test_interest_rules_are_read_from_env(monkeypatch):
-    monkeypatch.setenv(
-        "INTEREST_RULES",
-        '{"acc-a": {"attribution": "previous_month", "expected": "monthly"}, "acc-b": {}}',
-    )
-
-    rules = get_ghostfolio_config_from_env().interest_rules
-
-    assert rules == {
-        "acc-a": InterestRuleConfig(attribution="previous_month", expected="monthly"),
-        "acc-b": InterestRuleConfig(),
-    }
-
-
-@pytest.mark.parametrize("value", ["", "   "])
-def test_blank_interest_rules_mean_none(monkeypatch, value):
-    monkeypatch.setenv("INTEREST_RULES", value)
-
-    assert get_ghostfolio_config_from_env().interest_rules == {}
-
-
-def test_invalid_interest_rule_is_rejected(monkeypatch):
-    monkeypatch.setenv("INTEREST_RULES", '{"acc-a": {"attribution": "yearly"}}')
-
-    with pytest.raises(ValueError, match="attribution"):
-        get_ghostfolio_config_from_env()

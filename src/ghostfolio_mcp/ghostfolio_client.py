@@ -8,8 +8,8 @@ from typing import Any
 
 import httpx2
 
+from ghostfolio_mcp.models import AccountProfile
 from ghostfolio_mcp.models import GhostfolioConfig
-from ghostfolio_mcp.models import InterestRuleConfig
 from ghostfolio_mcp.models import TransportConfig
 from ghostfolio_mcp.utils import parse_bool
 from ghostfolio_mcp.utils import quote_path_segment
@@ -291,21 +291,38 @@ def get_ghostfolio_config_from_env() -> GhostfolioConfig:
             else "bm25"
         ),
         tool_search_max_results=int(os.getenv("TOOL_SEARCH_MAX_RESULTS", "5")),
-        interest_rules=_interest_rules_from_env(),
+        account_profiles=_account_profiles_from_env(),
+        default_benchmark=os.getenv("DEFAULT_BENCHMARK", "").strip() or None,
     )
 
 
-def _interest_rules_from_env() -> dict[str, InterestRuleConfig]:
-    """Parse INTEREST_RULES: a JSON object of account ID -> rule, blank = none."""
-    raw = os.getenv("INTEREST_RULES", "").strip()
+def _json_object_from_env(name: str) -> dict[str, Any]:
+    """Parse an env var holding a JSON object; blank or unset means empty."""
+    raw = os.getenv(name, "").strip()
     if not raw:
         return {}
-    rules = json.loads(raw)
-    if not isinstance(rules, dict):
-        raise ValueError("INTEREST_RULES must be a JSON object keyed by account ID")
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be a JSON object keyed by account ID")
+    return value
+
+
+def _account_profiles_from_env() -> dict[str, AccountProfile]:
+    """Parse ACCOUNT_PROFILES, folding in the older INTEREST_RULES.
+
+    INTEREST_RULES only fills the ``interest`` section of accounts whose
+    ACCOUNT_PROFILES entry does not set one, so moving a rule over to
+    ACCOUNT_PROFILES never changes behaviour.
+    """
+    profiles = {
+        str(account_id): dict(profile)
+        for account_id, profile in _json_object_from_env("ACCOUNT_PROFILES").items()
+    }
+    for account_id, rule in _json_object_from_env("INTEREST_RULES").items():
+        profiles.setdefault(str(account_id), {}).setdefault("interest", rule)
     return {
-        str(account_id): InterestRuleConfig.model_validate(rule)
-        for account_id, rule in rules.items()
+        account_id: AccountProfile.model_validate(profile)
+        for account_id, profile in profiles.items()
     }
 
 
