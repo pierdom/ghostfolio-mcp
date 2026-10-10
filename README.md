@@ -646,6 +646,7 @@ The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees + interest_fees = 
 - A period not covered by snapshots on every day gets no yield (`partial_coverage`), since a whole month's interest would be set against part of its balance. The portfolio `total` sums only fully covered accounts and names the others in `accounts_left_out`.
 - Flags per account: `history_starts`, `partial_coverage`, `stale_snapshot` (none in 45 days), `max_snapshot_gap_days`, `interest_without_balance`.
 - Every account with balance history is reported, including accounts excluded from analysis (`excluded_from_analysis`).
+- An account paying quarterly or semiannually puts several months of interest into one month, so its single-month yield is inflated; read its yield over the whole period (`summary`).
 
 ## Import Preview
 
