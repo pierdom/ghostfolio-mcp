@@ -21,6 +21,8 @@ from ghostfolio_mcp.analytics.audit import AuditConfig
 from ghostfolio_mcp.analytics.audit import BalanceSnapshot
 from ghostfolio_mcp.analytics.audit import audit_portfolio
 from ghostfolio_mcp.analytics.audit import parse_balance_snapshots
+from ghostfolio_mcp.analytics.cash_yield import CashYieldConfig
+from ghostfolio_mcp.analytics.cash_yield import compute_cash_yield
 from ghostfolio_mcp.analytics.common import PricePoint
 from ghostfolio_mcp.analytics.common import parse_market_data
 from ghostfolio_mcp.analytics.monthly_returns import InterestRule
@@ -290,3 +292,82 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             ),
             as_of,
         )
+
+    @mcp.tool(
+        tags={"portfolio", "analytics", "cash", "read-only"},
+        annotations={
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+        },
+    )
+    async def get_cash_yield(
+        start_month: Annotated[
+            str, Field(description="First month to report, YYYY-MM")
+        ],
+        end_month: Annotated[str, Field(description="Last month to report, YYYY-MM")],
+        timezone: Annotated[
+            str,
+            Field(
+                default="Europe/Madrid",
+                description="IANA timezone interest dates are bucketed in",
+            ),
+        ] = "Europe/Madrid",
+        interest_attribution: Annotated[
+            Literal["payment_date", "accrual"],
+            Field(
+                default="payment_date",
+                description=(
+                    "'payment_date' books interest in the month it was paid; "
+                    "'accrual' applies the per-account interest rules from "
+                    "ACCOUNT_PROFILES"
+                ),
+            ),
+        ] = "payment_date",
+    ) -> dict[str, Any]:
+        """
+        Get the effective interest yield on cash, per account and month.
+
+        Read-only and deterministic. Average balance comes from each
+        account's balance history (a balance holds until the next snapshot);
+        yield is interest over average balance, annualized on ACT/365. A
+        period not fully covered by snapshots gets no yield rather than a
+        misleading one, and the portfolio total lists the accounts it leaves
+        out. Measured up to yesterday.
+
+        Args:
+            start_month: First month to report, YYYY-MM
+            end_month: Last month to report, YYYY-MM
+            timezone: IANA timezone interest dates are bucketed in
+            interest_attribution: 'payment_date' or 'accrual'
+
+        Returns:
+            Dictionary with method_version, config, window, months and summary
+        """
+        _check_timezone(timezone)
+        try:
+            month_start(start_month)
+            month_start(end_month)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        as_of = _today(timezone) - timedelta(days=1)
+        async with get_ghostfolio_client(config) as client:
+            raw_activities = (await client.get("activities")).get("activities") or []
+            accounts, snapshots = await _fetch_accounts(client)
+        activities = parse_activities(raw_activities, timezone, CHART_TIMEZONE)
+        try:
+            return compute_cash_yield(
+                accounts,
+                snapshots,
+                activities,
+                CashYieldConfig(
+                    timezone=timezone,
+                    interest_attribution=interest_attribution,
+                    interest_rules=_interest_rules(config),
+                ),
+                start_month,
+                end_month,
+                as_of,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc

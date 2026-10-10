@@ -310,6 +310,7 @@ Sentry is completely optional. If you don't set `SENTRY_DSN`, the server will ru
 
 - `get_portfolio_performance`: Get portfolio performance data including returns, benchmarks, and performance metrics
 - `audit_portfolio_data`: Read-only data-quality audit - trades booked a day off, duplicates, misdated or missing interest, stale balances and prices, chart gaps and more - see [Portfolio Data Audit](#portfolio-data-audit)
+- `get_cash_yield`: Effective interest yield on cash per account and month, from balance history - see [Cash Yield](#cash-yield)
 - `get_monthly_returns`: Deterministic per-month returns (net/gross P&L, fees, interest per account, flows, TWR, Modified Dietz) with data-quality flags - see [Monthly Returns](#monthly-returns)
 - `get_portfolio_holdings`: Get portfolio holdings and positions including allocations and asset breakdowns
 - `get_portfolio_details`: Get comprehensive portfolio details including accounts, positions, and summary
@@ -632,6 +633,16 @@ The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees = 0` within 0.01. 
 | `legacy_seed_position` | info | A first buy more than 180 days before the next and under 1% of all buys |
 | `mixed_timestamp_styles` | info | One account records the same kind of activity at UTC midnight, local midnight and intraday times |
 | `missing_isin`, `unsupported_activity_type`, `non_base_currency` | info | Data the analytics tools cannot fully interpret |
+
+## Cash Yield
+
+`get_cash_yield` measures what cash actually earns, per account and month, plus a period summary. Inputs match `get_monthly_returns`: `start_month`, `end_month`, `timezone`, `interest_attribution`.
+
+- The balance on a day is the latest balance snapshot on or before it: a balance holds until the next snapshot. `avg_balance` is the mean over the covered days.
+- `period_yield = interest / avg_balance` and `annualized_yield = period_yield × 365 / days` (simple, ACT/365), up to yesterday.
+- A period not covered by snapshots on every day gets no yield (`partial_coverage`), since a whole month's interest would be set against part of its balance. The portfolio `total` sums only fully covered accounts and names the others in `accounts_left_out`.
+- Flags per account: `history_starts`, `partial_coverage`, `stale_snapshot` (none in 45 days), `max_snapshot_gap_days`, `interest_without_balance`.
+- Every account with balance history is reported, including accounts excluded from analysis (`excluded_from_analysis`).
 
 ## Data Sources
 

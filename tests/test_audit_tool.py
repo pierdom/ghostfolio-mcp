@@ -2,20 +2,10 @@
 
 from datetime import date
 
-import httpx2
 import pytest
-from fastmcp import FastMCP
 
-from ghostfolio_mcp import ghostfolio_client as client_module
-from ghostfolio_mcp.ghostfolio_client import GhostfolioClient
 from ghostfolio_mcp.models import AccountProfile
-from ghostfolio_mcp.models import GhostfolioConfig
 from ghostfolio_mcp.models import InterestRuleConfig
-from ghostfolio_mcp.tools import analytics as analytics_module
-from ghostfolio_mcp.tools import register_tools
-
-BASE_URL = "https://ghostfolio.test:3333"
-AUTH_PATH = "/api/v1/auth/anonymous/"
 
 ACTIVITIES = [
     {
@@ -88,47 +78,17 @@ RESPONSES = {
 }
 
 
-@pytest.fixture
-def server(monkeypatch):
-    monkeypatch.setattr(analytics_module, "_today", lambda _tz: date(2026, 4, 11))
-    config = GhostfolioConfig(
-        ghostfolio_url=BASE_URL,
-        token="api-token",
+@pytest.mark.asyncio
+async def test_audit_reads_only_and_reports_findings(fake_ghostfolio):
+    call_tool, requests = fake_ghostfolio(
+        RESPONSES,
+        today=date(2026, 4, 11),
         account_profiles={
             "acc-a": AccountProfile(interest=InterestRuleConfig(expected="daily"))
         },
     )
-    mcp = FastMCP(name="test")
-    register_tools(mcp, config)
-    requests: list[httpx2.Request] = []
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        if request.url.path == AUTH_PATH:
-            return httpx2.Response(200, json={"authToken": "jwt"})
-        requests.append(request)
-        if request.url.path in RESPONSES:
-            return httpx2.Response(200, json=RESPONSES[request.url.path])
-        return httpx2.Response(404, json={})
-
-    GhostfolioClient._instance = None
-    client_module._ghostfolio_client_singleton = None
-    client = client_module.get_ghostfolio_client(config)
-    client.client = httpx2.AsyncClient(
-        base_url=client.base_url, transport=httpx2.MockTransport(handler)
-    )
-    yield mcp, requests
-    GhostfolioClient._instance = None
-    client_module._ghostfolio_client_singleton = None
-
-
-@pytest.mark.asyncio
-async def test_audit_reads_only_and_reports_findings(server):
-    mcp, requests = server
-    tool = await mcp.get_tool("audit_portfolio_data")
-    assert tool is not None
-
-    result = (await tool.run({})).structured_content
-    assert result is not None
+    result = await call_tool("audit_portfolio_data", {})
 
     assert {r.method for r in requests} == {"GET"}
     assert sorted({r.url.path for r in requests}) == sorted(RESPONSES)
