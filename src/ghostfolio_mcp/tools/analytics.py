@@ -21,6 +21,8 @@ from ghostfolio_mcp.analytics.audit import AuditConfig
 from ghostfolio_mcp.analytics.audit import BalanceSnapshot
 from ghostfolio_mcp.analytics.audit import audit_portfolio
 from ghostfolio_mcp.analytics.audit import parse_balance_snapshots
+from ghostfolio_mcp.analytics.benchmark import BenchmarkConfig
+from ghostfolio_mcp.analytics.benchmark import compare_with_benchmark
 from ghostfolio_mcp.analytics.cash_yield import CashYieldConfig
 from ghostfolio_mcp.analytics.cash_yield import compute_cash_yield
 from ghostfolio_mcp.analytics.common import PricePoint
@@ -76,6 +78,47 @@ def _interest_rules(config: GhostfolioConfig) -> dict[str, InterestRule]:
 
 def _security_key(data_source: str, symbol: str) -> str:
     return f"{data_source}:{symbol}"
+
+
+async def _fetch_daily_chart(client: Any, start_month: str) -> tuple[list, str]:
+    """The shortest daily chart with a row before ``start_month``, and its range."""
+    window_start = month_start(start_month)
+    for candidate in DAILY_CHART_RANGES:
+        performance = await client.get(
+            "portfolio/performance", params={"range": candidate}, api_version="v2"
+        )
+        rows = parse_chart(performance.get("chart") or [])
+        if rows and rows[0].date < window_start:
+            return rows, candidate
+    raise ToolError(
+        f"No daily chart reaches back before {start_month}; the daily ranges "
+        f"({', '.join(DAILY_CHART_RANGES)}) cover about the last year only"
+    )
+
+
+async def _resolve_benchmark(
+    client: Any, config: GhostfolioConfig, requested: str | None
+) -> tuple[str, str]:
+    """(dataSource, symbol): the argument, DEFAULT_BENCHMARK, or the user's."""
+    choice = (requested or "").strip() or config.default_benchmark
+    if not choice:
+        user = await client.get("user")
+        benchmark_id = (user.get("settings") or {}).get("benchmark")
+        info = await client.get("info")
+        match = next(
+            (b for b in info.get("benchmarks") or [] if b.get("id") == benchmark_id),
+            None,
+        )
+        if match is None:
+            raise ToolError(
+                "No benchmark given, DEFAULT_BENCHMARK is unset and the Ghostfolio "
+                "user settings select none"
+            )
+        return match["dataSource"], match["symbol"]
+    data_source, _, symbol = choice.partition(":")
+    if not data_source or not symbol:
+        raise ToolError(f"Benchmark must be DATASOURCE:SYMBOL, got {choice!r}")
+    return data_source, symbol
 
 
 async def _fetch_prices(
@@ -185,29 +228,12 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             interest_rules=_interest_rules(config),
         )
         try:
-            window_start = month_start(start_month)
+            month_start(start_month)
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
 
         async with get_ghostfolio_client(config) as client:
-            rows = None
-            chart_range = None
-            for candidate in DAILY_CHART_RANGES:
-                performance = await client.get(
-                    "portfolio/performance",
-                    params={"range": candidate},
-                    api_version="v2",
-                )
-                parsed = parse_chart(performance.get("chart") or [])
-                if parsed and parsed[0].date < window_start:
-                    rows, chart_range = parsed, candidate
-                    break
-            if rows is None:
-                raise ToolError(
-                    f"No daily chart reaches back before {start_month}; the "
-                    f"daily ranges ({', '.join(DAILY_CHART_RANGES)}) cover about "
-                    "the last year only"
-                )
+            rows, chart_range = await _fetch_daily_chart(client, start_month)
             raw_activities = (await client.get("activities")).get("activities") or []
 
         activities = parse_activities(raw_activities, timezone, CHART_TIMEZONE)
@@ -612,3 +638,107 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             )
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
+
+    @mcp.tool(
+        tags={"portfolio", "performance", "analytics", "benchmark", "read-only"},
+        annotations={
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+        },
+    )
+    async def get_benchmark_comparison(
+        start_month: Annotated[
+            str, Field(description="First month to report, YYYY-MM")
+        ],
+        end_month: Annotated[str, Field(description="Last month to report, YYYY-MM")],
+        benchmark: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Benchmark as DATASOURCE:SYMBOL, e.g. YAHOO:VWCE.DE; defaults "
+                    "to DEFAULT_BENCHMARK, then the Ghostfolio user's benchmark"
+                ),
+            ),
+        ] = None,
+        timezone: Annotated[
+            str,
+            Field(
+                default="Europe/Madrid",
+                description="IANA timezone interest dates are bucketed in",
+            ),
+        ] = "Europe/Madrid",
+        interest_attribution: Annotated[
+            Literal["payment_date", "accrual"],
+            Field(
+                default="payment_date",
+                description=(
+                    "'payment_date' or 'accrual' (per-account interest rules from "
+                    "ACCOUNT_PROFILES), for the interest set against cash drag"
+                ),
+            ),
+        ] = "payment_date",
+    ) -> dict[str, Any]:
+        """
+        Compare the portfolio with a benchmark per month, and measure cash drag.
+
+        Read-only and deterministic, on the same daily chart and flows as
+        get_monthly_returns. Per month and over the period: the portfolio's
+        TWR next to the benchmark's return and the excess; the portfolio's
+        net market P&L next to what a benchmark holding with the same opening
+        value and the same flows would have made; and cash drag - what the
+        cash held would have earned in the benchmark, minus the interest it
+        actually earned (positive means holding cash cost money). The
+        benchmark is any asset with stored prices; an accumulating fund's
+        price return is its total return. Today's chart row is left out.
+
+        Args:
+            start_month: First month to report, YYYY-MM
+            end_month: Last month to report, YYYY-MM
+            benchmark: DATASOURCE:SYMBOL; defaults as described
+            timezone: IANA timezone interest dates are bucketed in
+            interest_attribution: 'payment_date' or 'accrual'
+
+        Returns:
+            Dictionary with method_version, config, window, months and summary
+        """
+        _check_timezone(timezone)
+        try:
+            month_start(start_month)
+            month_start(end_month)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        async with get_ghostfolio_client(config) as client:
+            data_source, symbol = await _resolve_benchmark(client, config, benchmark)
+            rows, chart_range = await _fetch_daily_chart(client, start_month)
+            raw_activities = (await client.get("activities")).get("activities") or []
+            accounts, snapshots = await _fetch_accounts(client)
+            prices, _isins = await _fetch_prices(client, [(data_source, symbol)])
+        excluded = frozenset(a.id for a in accounts if a.excluded_from_analysis)
+        cash_known_from = min(
+            (s.date for s in snapshots if s.account_id not in excluded), default=None
+        )
+        key = _security_key(data_source, symbol)
+        try:
+            result = compare_with_benchmark(
+                rows,
+                prices[key],
+                parse_activities(raw_activities, timezone, CHART_TIMEZONE),
+                BenchmarkConfig(
+                    benchmark=key,
+                    timezone=timezone,
+                    chart_timezone=CHART_TIMEZONE,
+                    interest_attribution=interest_attribution,
+                    interest_rules=_interest_rules(config),
+                    excluded_accounts=excluded,
+                ),
+                start_month,
+                end_month,
+                last_complete_date=_today(CHART_TIMEZONE) - timedelta(days=1),
+                cash_known_from=cash_known_from,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        result["window"]["chart_range"] = chart_range
+        return result

@@ -73,8 +73,11 @@ __all__ = [
     "METHOD_VERSION",
     "Activity",
     "ChartRow",
+    "ChartWindow",
+    "Day",
     "InterestRule",
     "ReturnsConfig",
+    "chart_window",
     "compute_monthly_returns",
     "month_start",
     "parse_activities",
@@ -101,7 +104,7 @@ class ReturnsConfig:
 
 
 @dataclass(frozen=True)
-class _Day:
+class Day:
     """The change between two consecutive chart rows, dated at the later one."""
 
     date: date
@@ -110,6 +113,7 @@ class _Day:
     d_np: float
     d_value: float
     d_investment: float
+    prev_cash: float = 0.0
 
     @property
     def flow(self) -> float:
@@ -118,6 +122,72 @@ class _Day:
     @property
     def capital(self) -> float:
         return self.prev_value + self.flow
+
+
+@dataclass(frozen=True)
+class ChartWindow:
+    """The daily changes of one chart response inside a month window."""
+
+    baseline: ChartRow
+    days: list[Day]
+    months: list[str]
+    last_date: date
+    data_end: date
+    dropped: list[str]
+
+
+def chart_window(
+    rows: list[ChartRow],
+    start_month: str,
+    end_month: str,
+    last_complete_date: date | None = None,
+) -> ChartWindow:
+    """Cut one chart response to [start_month, end_month] and take daily deltas.
+
+    Rows after ``last_complete_date`` are dropped first. The baseline is the
+    last row before ``start_month``; ``months`` is clipped to the data.
+
+    Raises:
+        ValueError: On malformed or reversed months, or when the chart has no
+            row before ``start_month`` or none inside the window.
+    """
+    if month_key(start_month) > month_key(end_month):
+        raise ValueError("start_month must not be after end_month")
+    dropped = []
+    if last_complete_date is not None:
+        dropped = [r.date.isoformat() for r in rows if r.date > last_complete_date]
+        rows = [r for r in rows if r.date <= last_complete_date]
+    window_start = month_start(start_month)
+    requested_end = month_end(end_month)
+    baseline_index = bisect_left([r.date for r in rows], window_start) - 1
+    if baseline_index < 0:
+        raise ValueError(
+            f"The chart has no row before {window_start.isoformat()}, so the "
+            f"first day of {start_month} cannot be measured"
+        )
+    scope = [r for r in rows[baseline_index:] if r.date <= requested_end]
+    if len(scope) < 2:
+        raise ValueError(f"The chart has no rows in {start_month}..{end_month}")
+    last_date = scope[-1].date
+    return ChartWindow(
+        baseline=scope[0],
+        days=[
+            Day(
+                date=cur.date,
+                prev_date=prev.date,
+                prev_value=prev.value,
+                d_np=cur.net_performance - prev.net_performance,
+                d_value=cur.value - prev.value,
+                d_investment=cur.total_investment - prev.total_investment,
+                prev_cash=prev.cash,
+            )
+            for prev, cur in pairwise(scope)
+        ],
+        months=months_between(start_month, min(end_month, month_of(last_date))),
+        last_date=last_date,
+        data_end=rows[-1].date,
+        dropped=dropped,
+    )
 
 
 def _interest_month(activity: Activity, config: ReturnsConfig) -> str:
@@ -130,7 +200,7 @@ def _interest_month(activity: Activity, config: ReturnsConfig) -> str:
     return month
 
 
-def _twr(days: list[_Day], tolerance: float) -> tuple[float | None, list[str]]:
+def _twr(days: list[Day], tolerance: float) -> tuple[float | None, list[str]]:
     """Chain daily returns; None if any day earned money on no capital."""
     growth = 1.0
     undefined = []
@@ -148,7 +218,7 @@ def _twr(days: list[_Day], tolerance: float) -> tuple[float | None, list[str]]:
 
 
 def _dietz(
-    days: list[_Day], start: date, end: date, opening_value: float
+    days: list[Day], start: date, end: date, opening_value: float
 ) -> tuple[float, float | None]:
     """Return (avg_invested_capital, modified_dietz) over [start, end]."""
     span = (end - start).days + 1
@@ -186,41 +256,11 @@ def compute_monthly_returns(
         ValueError: On malformed months, or when the chart has no row before
             ``start_month`` to measure the first day against.
     """
-    if month_key(start_month) > month_key(end_month):
-        raise ValueError("start_month must not be after end_month")
     tolerance = config.invariant_tolerance
-
-    dropped = []
-    if last_complete_date is not None:
-        dropped = [r.date.isoformat() for r in rows if r.date > last_complete_date]
-        rows = [r for r in rows if r.date <= last_complete_date]
-
+    window = chart_window(rows, start_month, end_month, last_complete_date)
+    baseline, days, months = window.baseline, window.days, window.months
+    last_date, dropped = window.last_date, window.dropped
     window_start = month_start(start_month)
-    requested_end = month_end(end_month)
-    baseline_index = bisect_left([r.date for r in rows], window_start) - 1
-    if baseline_index < 0:
-        raise ValueError(
-            f"The chart has no row before {window_start.isoformat()}, so the "
-            f"first day of {start_month} cannot be measured"
-        )
-    scope = [r for r in rows[baseline_index:] if r.date <= requested_end]
-    baseline = scope[0]
-    if len(scope) < 2:
-        raise ValueError(f"The chart has no rows in {start_month}..{end_month}")
-    last_date = scope[-1].date
-    months = months_between(start_month, min(end_month, month_of(last_date)))
-
-    days = [
-        _Day(
-            date=cur.date,
-            prev_date=prev.date,
-            prev_value=prev.value,
-            d_np=cur.net_performance - prev.net_performance,
-            d_value=cur.value - prev.value,
-            d_investment=cur.total_investment - prev.total_investment,
-        )
-        for prev, cur in pairwise(scope)
-    ]
     day_dates = [day.date for day in days]
 
     def chart_bucket(activity: Activity) -> date | None:
@@ -233,7 +273,7 @@ def compute_monthly_returns(
     # requested window): anything later is not reflected in the data this
     # result is computed from, while a payment after the window can still be
     # attributed to it under accrual.
-    data_end = rows[-1].date
+    data_end = window.data_end
     known = [
         a for a in activities if a.local_date <= data_end and a.chart_date <= data_end
     ]

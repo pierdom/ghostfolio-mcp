@@ -313,6 +313,7 @@ Sentry is completely optional. If you don't set `SENTRY_DSN`, the server will ru
 - `get_cash_yield`: Effective interest yield on cash per account and month, from balance history - see [Cash Yield](#cash-yield)
 - `get_realized_gains`: FIFO realized gains per sale and tax year, with lots consumed and a two-month-rule flag - see [Realized Gains](#realized-gains)
 - `get_modelo720_inputs`: Year-end and Q4-average cash and year-end securities for accounts held abroad, against the Modelo 720 thresholds - see [Modelo 720 Inputs](#modelo-720-inputs)
+- `get_benchmark_comparison`: Portfolio vs a configurable benchmark per month - TWR vs benchmark return, P&L vs a same-flows benchmark holding - plus cash drag - see [Benchmark Comparison and Cash Drag](#benchmark-comparison-and-cash-drag)
 - `get_monthly_returns`: Deterministic per-month returns (net/gross P&L, fees, interest per account, flows, TWR, Modified Dietz) with data-quality flags - see [Monthly Returns](#monthly-returns)
 - `get_portfolio_holdings`: Get portfolio holdings and positions including allocations and asset breakdowns
 - `get_portfolio_details`: Get comprehensive portfolio details including accounts, positions, and summary
@@ -682,6 +683,20 @@ Assets are identified by `dataSource:symbol`, so the same security bought under 
 - Securities: per account, the quantity held on the valuation date times the last stored close on or before it, with `no_price` and `stale_price` flags.
 - Each category reports whether it exceeds 50,000 - for cash, the larger of the year-end and Q4-average totals - and, given `previous_declared_accounts` / `previous_declared_securities`, whether it grew by more than 20,000 since.
 - Accounts excluded from Ghostfolio's analysis are included when marked foreign. Only base-currency trades are supported.
+
+## Benchmark Comparison and Cash Drag
+
+`get_benchmark_comparison` puts the portfolio next to a benchmark, per month and over the period, on the same daily chart and flows as `get_monthly_returns`. The benchmark is `benchmark` (`DATASOURCE:SYMBOL`), else `DEFAULT_BENCHMARK`, else the benchmark selected in the Ghostfolio user settings. Any asset with stored prices works; an accumulating fund's price return is its total return.
+
+| Field | Definition |
+| --- | --- |
+| `benchmark_return` | The benchmark's own return: its close chained over the chart days (last stored close on or before each day) |
+| `excess_return` | `twr - benchmark_return` |
+| `benchmark_pnl` | P&L of a benchmark holding that starts at the portfolio's opening value and receives the same flows, bought or sold at the previous close at the start of the day; compare with `market_pnl_net` (`pnl_difference`) |
+| `cash.benchmark_opportunity` | Σ previous day's cash × the benchmark's return that day: what the cash would have earned in the benchmark |
+| `cash.cash_drag` | `benchmark_opportunity - interest`; positive when holding cash cost money against the benchmark |
+
+Months are measured independently; the summary runs one benchmark holding over the whole period. Cash comes from the chart (`totalCashInBaseCurrency`, which leaves out accounts excluded from analysis), and interest - gross, attributed as in `get_monthly_returns` - from the same accounts. Days before the first balance snapshot (`cash_known_from`) are left out of cash drag, since the chart shows no cash before then.
 
 ## Data Sources
 
