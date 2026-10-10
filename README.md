@@ -312,6 +312,7 @@ Sentry is completely optional. If you don't set `SENTRY_DSN`, the server will ru
 - `audit_portfolio_data`: Read-only data-quality audit - trades booked a day off, duplicates, misdated or missing interest, stale balances and prices, chart gaps and more - see [Portfolio Data Audit](#portfolio-data-audit)
 - `get_cash_yield`: Effective interest yield on cash per account and month, from balance history - see [Cash Yield](#cash-yield)
 - `get_realized_gains`: FIFO realized gains per sale and tax year, with lots consumed and a two-month-rule flag - see [Realized Gains](#realized-gains)
+- `get_modelo720_inputs`: Year-end and Q4-average cash and year-end securities for accounts held abroad, against the Modelo 720 thresholds - see [Modelo 720 Inputs](#modelo-720-inputs)
 - `get_monthly_returns`: Deterministic per-month returns (net/gross P&L, fees, interest per account, flows, TWR, Modified Dietz) with data-quality flags - see [Monthly Returns](#monthly-returns)
 - `get_portfolio_holdings`: Get portfolio holdings and positions including allocations and asset breakdowns
 - `get_portfolio_details`: Get comprehensive portfolio details including accounts, positions, and summary
@@ -671,6 +672,16 @@ Warnings never change the status: a local-midnight timestamp (Ghostfolio books i
 - Only base-currency trades are supported; anything else is refused.
 
 Assets are identified by `dataSource:symbol`, so the same security bought under two listings counts as two assets (see the audit's `missing_isin` check).
+
+## Modelo 720 Inputs
+
+`get_modelo720_inputs` computes the figures Spain's Modelo 720 asks about, for the accounts marked `modelo720.foreign` in `ACCOUNT_PROFILES`. It is read-only and deterministic, and it is not tax advice: which accounts count as foreign, and what to declare, is yours to decide.
+
+- Valuation date: Dec 31 of `year`, or yesterday while the year is still running (`year_complete: false`, a preview).
+- Cash (`accounts` category): the balance on the valuation date and the average daily balance over Q4, from balance history (a balance holds until the next snapshot). Uncovered days are reported (`q4_covered_days`), not filled in.
+- Securities: per account, the quantity held on the valuation date times the last stored close on or before it, with `no_price` and `stale_price` flags.
+- Each category reports whether it exceeds 50,000 - for cash, the larger of the year-end and Q4-average totals - and, given `previous_declared_accounts` / `previous_declared_securities`, whether it grew by more than 20,000 since.
+- Accounts excluded from Ghostfolio's analysis are included when marked foreign. Only base-currency trades are supported.
 
 ## Data Sources
 

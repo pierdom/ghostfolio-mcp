@@ -27,6 +27,8 @@ from ghostfolio_mcp.analytics.common import PricePoint
 from ghostfolio_mcp.analytics.common import parse_market_data
 from ghostfolio_mcp.analytics.import_preview import PreviewConfig
 from ghostfolio_mcp.analytics.import_preview import preview_import as run_import_preview
+from ghostfolio_mcp.analytics.modelo720 import Modelo720Config
+from ghostfolio_mcp.analytics.modelo720 import compute_modelo720_inputs
 from ghostfolio_mcp.analytics.monthly_returns import InterestRule
 from ghostfolio_mcp.analytics.monthly_returns import ReturnsConfig
 from ghostfolio_mcp.analytics.monthly_returns import compute_monthly_returns
@@ -503,6 +505,110 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
                     ),
                 ),
                 year,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool(
+        tags={"portfolio", "analytics", "tax", "read-only"},
+        annotations={
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+        },
+    )
+    async def get_modelo720_inputs(
+        year: Annotated[int, Field(description="Year to report, e.g. 2026")],
+        previous_declared_accounts: Annotated[
+            float | None,
+            Field(
+                default=None,
+                description="Accounts total in the last Modelo 720 filed, if any",
+            ),
+        ] = None,
+        previous_declared_securities: Annotated[
+            float | None,
+            Field(
+                default=None,
+                description="Securities total in the last Modelo 720 filed, if any",
+            ),
+        ] = None,
+        timezone: Annotated[
+            str,
+            Field(
+                default="Europe/Madrid",
+                description="IANA timezone trade dates are read in",
+            ),
+        ] = "Europe/Madrid",
+    ) -> dict[str, Any]:
+        """
+        Get the figures Modelo 720 asks about for accounts held abroad.
+
+        Read-only and deterministic; not tax advice. Covers the accounts with
+        modelo720.foreign in ACCOUNT_PROFILES. Per account: cash balance on
+        Dec 31 and its Q4 average (from balance history), and securities held
+        on Dec 31 valued at the last stored close. Per category (accounts,
+        securities): the total, whether it exceeds 50,000 (for cash, the larger
+        of year-end and Q4 average), and the increase over the previously
+        declared value against the 20,000 rule. A year still running is
+        valued as of yesterday and marked year_complete=false.
+
+        Args:
+            year: Year to report, e.g. 2026
+            previous_declared_accounts: Accounts total last declared, if any
+            previous_declared_securities: Securities total last declared, if any
+            timezone: IANA timezone trade dates are read in
+
+        Returns:
+            Dictionary with method_version, config, valuation_date, accounts and categories
+        """
+        _check_timezone(timezone)
+        foreign = frozenset(
+            account_id
+            for account_id, profile in config.account_profiles.items()
+            if profile.modelo720.foreign
+        )
+        if not foreign:
+            raise ToolError(
+                "No account is marked modelo720.foreign in ACCOUNT_PROFILES"
+            )
+        as_of = _today(timezone) - timedelta(days=1)
+        async with get_ghostfolio_client(config) as client:
+            raw_activities = (await client.get("activities")).get("activities") or []
+            activities = parse_activities(raw_activities, timezone, CHART_TIMEZONE)
+            accounts, snapshots = await _fetch_accounts(client)
+            prices, _isins = await _fetch_prices(
+                client,
+                [
+                    (a.data_source, a.symbol)
+                    for a in activities
+                    if a.type in ("BUY", "SELL") and a.account_id in foreign
+                ],
+            )
+            user = await client.get("user")
+        previous = {
+            name: value
+            for name, value in (
+                ("accounts", previous_declared_accounts),
+                ("securities", previous_declared_securities),
+            )
+            if value is not None
+        }
+        try:
+            return compute_modelo720_inputs(
+                accounts,
+                snapshots,
+                activities,
+                prices,
+                Modelo720Config(
+                    timezone=timezone,
+                    base_currency=(user.get("settings") or {}).get("baseCurrency")
+                    or "EUR",
+                    foreign_accounts=foreign,
+                ),
+                year,
+                as_of,
+                previous,
             )
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
