@@ -39,8 +39,8 @@ class ChartRow:
 class Activity:
     """A Ghostfolio activity with its date resolved on both calendars.
 
-    ``amount`` and ``fee`` are in the base currency; ``unit_price`` is in
-    ``currency``, the activity's own currency.
+    ``amount`` and ``fee`` are in the base currency; ``unit_price`` and
+    ``native_fee`` are in ``currency``, the activity's own currency.
     """
 
     id: str
@@ -57,6 +57,7 @@ class Activity:
     unit_price: float = 0.0
     currency: str = ""
     timestamp: str = ""
+    native_fee: float = 0.0
 
     @property
     def security(self) -> str:
@@ -152,6 +153,7 @@ def parse_activities(
                 unit_price=float(raw.get("unitPrice") or 0),
                 currency=str(raw.get("currency") or profile.get("currency") or ""),
                 timestamp=str(raw["date"]),
+                native_fee=float(raw.get("fee") or 0),
             )
         )
     activities.sort(key=lambda activity: (activity.local_date, activity.id))

@@ -25,6 +25,8 @@ from ghostfolio_mcp.analytics.cash_yield import CashYieldConfig
 from ghostfolio_mcp.analytics.cash_yield import compute_cash_yield
 from ghostfolio_mcp.analytics.common import PricePoint
 from ghostfolio_mcp.analytics.common import parse_market_data
+from ghostfolio_mcp.analytics.import_preview import PreviewConfig
+from ghostfolio_mcp.analytics.import_preview import preview_import as run_import_preview
 from ghostfolio_mcp.analytics.monthly_returns import InterestRule
 from ghostfolio_mcp.analytics.monthly_returns import ReturnsConfig
 from ghostfolio_mcp.analytics.monthly_returns import compute_monthly_returns
@@ -371,3 +373,68 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             )
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
+
+    @mcp.tool(
+        tags={"import", "analytics", "read-only"},
+        annotations={
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+        },
+    )
+    async def preview_import(
+        data: Annotated[
+            dict[str, Any],
+            Field(
+                description=(
+                    "The payload you would pass to import_transactions: an "
+                    "'activities' list of objects with currency, dataSource, "
+                    "date, quantity, symbol, type, unitPrice, and usually fee "
+                    "and accountId"
+                )
+            ),
+        ],
+        timezone: Annotated[
+            str,
+            Field(
+                default="Europe/Madrid",
+                description="IANA timezone activities are compared by date in",
+            ),
+        ] = "Europe/Madrid",
+    ) -> dict[str, Any]:
+        """
+        Dry-run an activity import: find duplicates before anything is written.
+
+        Read-only and deterministic; nothing is imported. Each proposed
+        activity is classified against the existing activities and the
+        earlier items of the same batch: 'duplicate' (same account, type,
+        asset, local date, quantity, price and fee), 'conflict' (same account,
+        type, asset and date but different values, or a second payment on one
+        day from a daily interest payer), 'invalid' (missing or malformed
+        fields) or 'new'. Warnings flag local-midnight timestamps (booked on
+        the previous UTC day), date-only values, future dates and unknown
+        accounts. Run it before import_transactions or create_activity.
+
+        Args:
+            data: The import_transactions payload
+            timezone: IANA timezone activities are compared by date in
+
+        Returns:
+            Dictionary with method_version, config, today, summary and items
+        """
+        _check_timezone(timezone)
+        proposed = data.get("activities")
+        if not isinstance(proposed, list) or not all(
+            isinstance(item, dict) for item in proposed
+        ):
+            raise ToolError("data must contain an 'activities' list of objects")
+        async with get_ghostfolio_client(config) as client:
+            raw_activities = (await client.get("activities")).get("activities") or []
+            raw_accounts = (await client.get("account")).get("accounts") or []
+        return run_import_preview(
+            proposed,
+            parse_activities(raw_activities, timezone, CHART_TIMEZONE),
+            {a["id"]: a.get("name") or "" for a in raw_accounts},
+            PreviewConfig(timezone=timezone, interest_rules=_interest_rules(config)),
+            _today(timezone),
+        )

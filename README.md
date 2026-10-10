@@ -353,6 +353,7 @@ Sentry is completely optional. If you don't set `SENTRY_DSN`, the server will ru
 
 ### Data Import Tools
 
+- `preview_import`: Read-only dry run of an import - classifies each activity as new, duplicate, conflict or invalid before anything is written - see [Import Preview](#import-preview)
 - `import_transactions`: Import transactions into your portfolio (bulk import operation)
 - `get_dividends_for_import`: Fetch historical dividend data formatted for import for a specific symbol
 
@@ -643,6 +644,17 @@ The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees = 0` within 0.01. 
 - A period not covered by snapshots on every day gets no yield (`partial_coverage`), since a whole month's interest would be set against part of its balance. The portfolio `total` sums only fully covered accounts and names the others in `accounts_left_out`.
 - Flags per account: `history_starts`, `partial_coverage`, `stale_snapshot` (none in 45 days), `max_snapshot_gap_days`, `interest_without_balance`.
 - Every account with balance history is reported, including accounts excluded from analysis (`excluded_from_analysis`).
+
+## Import Preview
+
+`preview_import` takes the payload you would pass to `import_transactions` and imports nothing. Each activity is compared with the existing activities and with the earlier items of the same batch, by its date in `timezone`:
+
+- `duplicate`: same account, type, asset (`dataSource:symbol`), local date, quantity, price and fee (compared at 8 decimals).
+- `conflict`: same account, type, asset and date with a different quantity, price or fee - or a second payment on one day from an account whose `interest.expected` is `daily`.
+- `invalid`: a required field (`currency`, `dataSource`, `date`, `quantity`, `symbol`, `type`, `unitPrice`) is missing or malformed.
+- `new`: none of the above.
+
+Warnings never change the status: a local-midnight timestamp (Ghostfolio books it on the previous UTC day), a date-only value (read as UTC midnight), a future date, an unknown or missing `accountId`. The tool only reads, so it also works in `READ_ONLY_MODE`.
 
 ## Data Sources
 
