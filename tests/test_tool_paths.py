@@ -80,7 +80,7 @@ async def call(mcp: FastMCP, name: str, arguments: dict) -> None:
         (
             "get_market_data_for_asset",
             {"data_source": "MANUAL", "symbol": "A#B"},
-            "/api/v1/market-data/MANUAL/A%23B",
+            "/api/v1/asset/MANUAL/A%23B/",
         ),
         (
             "get_position",

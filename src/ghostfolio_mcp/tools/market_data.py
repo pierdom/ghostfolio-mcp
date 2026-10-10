@@ -38,8 +38,9 @@ def register_market_data_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
         """
         Get market data for a specific asset.
 
-        Retrieves current market data for a specific symbol including price,
-        volume, market cap, and other relevant market information.
+        Retrieves the asset profile and the full stored daily price history
+        (``marketData``) for a symbol. Each price row carries ``state`` and
+        ``isCarriedForward``, which marks a price repeated from an earlier day.
 
         Args:
             data_source: Data source (e.g., 'YAHOO', 'COINGECKO', 'MANUAL')
@@ -49,8 +50,12 @@ def register_market_data_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
             Dictionary containing market data for the specified symbol
         """
         async with get_ghostfolio_client(config) as client:
+            # GET market-data/<dataSource>/<symbol> no longer exists in
+            # Ghostfolio (404); the same {assetProfile, marketData} payload is
+            # served from asset/<dataSource>/<symbol>. Writing market data is
+            # still POST market-data/<dataSource>/<symbol>.
             return await client.get(
-                f"market-data/{quote_path_segment(data_source)}"
+                f"asset/{quote_path_segment(data_source)}"
                 f"/{quote_path_segment(symbol)}"
             )
 
