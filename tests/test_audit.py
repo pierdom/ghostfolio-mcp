@@ -587,3 +587,20 @@ def test_stale_price_ignores_repeated_closes():
     [finding] = checks(result, "stale_price")
 
     assert finding["dates"] == ["2026-08-20"]
+
+
+def test_accounts_configured_as_paying_no_interest_are_not_flagged():
+    result = run(
+        accounts=[AccountInfo("acc-a", "A", 5.0), AccountInfo("acc-b", "B", 5.0)],
+        snapshots=[
+            BalanceSnapshot("acc-a", AS_OF, 5.0),
+            BalanceSnapshot("acc-b", AS_OF, 5.0),
+        ],
+        cash_threshold=1.0,
+        no_interest_accounts={"acc-a"},
+    )
+
+    assert [f["account_id"] for f in checks(result, "cash_without_interest")] == [
+        "acc-b"
+    ]
+    assert result["config"]["no_interest_accounts"] == ["acc-a"]

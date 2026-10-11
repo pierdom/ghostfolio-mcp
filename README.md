@@ -172,7 +172,9 @@ TOOL_SEARCH_MAX_RESULTS=5
 #   interest.attribution: "payment_date" (default) or "previous_month" - the
 #     month a payment is booked in under interest_attribution=accrual
 #   interest.expected: "none" (default), "daily" or "monthly" - the known
-#     payment cadence; days or months without interest are flagged
+#     payment cadence; days or months without interest are flagged. Set
+#     "none" explicitly for an account that pays no interest, so the audit
+#     does not flag its cash (left unset, the account is still checked)
 #   tax.excluded: true leaves the account out of realized gains (e.g. a pension plan)
 #   modelo720.foreign: true counts the account for Modelo 720
 # ACCOUNT_PROFILES={"<account-id>": {"interest": {"attribution": "previous_month", "expected": "monthly"}, "modelo720": {"foreign": true}}}
@@ -631,7 +633,7 @@ The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees + interest_fees = 
 | `duplicate_activity` | error | Same account, type, asset, local date, quantity, price and fee |
 | `interest_day_conflict` | warn | A daily payer with two payments on one day, usually next to a day with none |
 | `missing_interest_day` / `missing_interest_month` | warn | A gap in a daily or monthly payer's interest (`interest.expected` in `ACCOUNT_PROFILES`). Daily cadence is checked per kind of interest, and only for a kind paid on at least half the days of its span |
-| `cash_without_interest` | info | Cash above 100 with no interest in 190 days |
+| `cash_without_interest` | info | Cash above 100 with no interest in 190 days; skipped for accounts whose profile sets `interest.expected` to `"none"` explicitly |
 | `stale_balance` | info | Cash above 100 and no balance snapshot in 45 days |
 | `stale_price` | warn | A held asset whose last real (not carried-forward) close is over 5 days old |
 | `chart_gap` / `invariant_break` | info / warn | Missing chart days, and invariant breaks outside sell days (see [Monthly Returns](#monthly-returns)) |

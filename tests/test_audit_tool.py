@@ -111,3 +111,32 @@ async def test_audit_reads_only_and_reports_findings(fake_ghostfolio):
     cash = [f for f in result["findings"] if f["check"] == "cash_without_interest"]
     assert [f["account_id"] for f in cash] == ["acc-b"]
     assert cash[0]["evidence"]["excluded_from_analysis"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("profile", "flagged"),
+    [
+        # Unset: "none" is only the default, the account is still checked.
+        ({"modelo720": {"foreign": True}}, True),
+        # Explicit: the account is known to pay no interest.
+        ({"interest": {"expected": "none"}}, False),
+    ],
+)
+async def test_only_an_explicit_no_interest_profile_silences_the_check(
+    fake_ghostfolio, profile, flagged
+):
+    call_tool, _requests = fake_ghostfolio(
+        RESPONSES,
+        today=date(2026, 4, 11),
+        account_profiles={"acc-b": AccountProfile.model_validate(profile)},
+    )
+
+    result = await call_tool("audit_portfolio_data", {})
+    cash = [
+        f["account_id"]
+        for f in result["findings"]
+        if f["check"] == "cash_without_interest"
+    ]
+
+    assert cash == (["acc-b"] if flagged else [])

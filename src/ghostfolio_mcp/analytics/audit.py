@@ -32,7 +32,8 @@ Checks (``METHOD_VERSION`` changes whenever one is added or its rule changes):
   per kind of interest (asset): only a kind paid on at least half the days of
   its span counts as daily, so occasional lending income is not checked.
 - ``cash_without_interest`` (info) - an account holding cash that paid no
-  interest within ``interest_window_days``.
+  interest within ``interest_window_days``. Accounts in
+  ``no_interest_accounts`` (configured as paying no interest) are skipped.
 - ``stale_balance`` (info) - an account with a cash balance whose last
   balance snapshot is older than ``stale_balance_days``.
 - ``stale_price`` (warn) - a held asset whose last real close (not carried
@@ -52,6 +53,7 @@ Checks (``METHOD_VERSION`` changes whenever one is added or its rule changes):
 import math
 from collections import Counter
 from collections import defaultdict
+from collections.abc import Collection
 from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field
@@ -76,7 +78,7 @@ from ghostfolio_mcp.analytics.common import shift_month
 from ghostfolio_mcp.analytics.monthly_returns import ReturnsConfig
 from ghostfolio_mcp.analytics.monthly_returns import compute_monthly_returns
 
-METHOD_VERSION = "audit/1"
+METHOD_VERSION = "audit/2"
 
 SUPPORTED_ACTIVITY_TYPES = frozenset({"BUY", "SELL", "INTEREST"})
 
@@ -107,6 +109,8 @@ class AuditConfig:
     chart_timezone: str = "UTC"
     base_currency: str = "EUR"
     interest_rules: Mapping[str, InterestRule] = field(default_factory=dict)
+    # Accounts explicitly configured as paying no interest.
+    no_interest_accounts: Collection[str] = field(default_factory=frozenset)
     # A price nearer one candidate date's close than the other's by at least
     # this share of the close decides the trade date.
     trade_date_min_gap: float = 0.002
@@ -465,7 +469,10 @@ def _check_interest(
 
     window_start = as_of - timedelta(days=config.interest_window_days)
     for account in sorted(accounts.values(), key=lambda a: a.id):
-        if account.balance <= config.cash_threshold:
+        if (
+            account.balance <= config.cash_threshold
+            or account.id in config.no_interest_accounts
+        ):
             continue
         recent = [
             a
@@ -794,6 +801,7 @@ def audit_portfolio(
                 account_id: {"attribution": rule.attribution, "expected": rule.expected}
                 for account_id, rule in sorted(config.interest_rules.items())
             },
+            "no_interest_accounts": sorted(config.no_interest_accounts),
             "thresholds": {
                 "trade_date_min_gap": config.trade_date_min_gap,
                 "trade_date_exact_gap": config.trade_date_exact_gap,

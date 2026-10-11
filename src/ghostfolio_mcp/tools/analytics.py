@@ -76,6 +76,21 @@ def _interest_rules(config: GhostfolioConfig) -> dict[str, InterestRule]:
     }
 
 
+def _no_interest_accounts(config: GhostfolioConfig) -> frozenset[str]:
+    """Accounts whose profile explicitly sets interest.expected to "none".
+
+    Left unset, "none" is only the default and says nothing about the
+    account; set explicitly, it states the account pays no interest.
+    """
+    return frozenset(
+        account_id
+        for account_id, profile in config.account_profiles.items()
+        if "interest" in profile.model_fields_set
+        and "expected" in profile.interest.model_fields_set
+        and profile.interest.expected == "none"
+    )
+
+
 def _security_key(data_source: str, symbol: str) -> str:
     return f"{data_source}:{symbol}"
 
@@ -321,6 +336,7 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
                 chart_timezone=CHART_TIMEZONE,
                 base_currency=base_currency,
                 interest_rules=_interest_rules(config),
+                no_interest_accounts=_no_interest_accounts(config),
             ),
             as_of,
         )
