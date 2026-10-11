@@ -604,3 +604,18 @@ def test_accounts_configured_as_paying_no_interest_are_not_flagged():
         "acc-b"
     ]
     assert result["config"]["no_interest_accounts"] == ["acc-a"]
+
+
+def test_quarterly_payer_missing_a_quarter():
+    result = run(
+        [
+            interest("q1", "2026-03-30T22:00:00.000Z"),  # Mar 31 local
+            interest("q3", "2026-09-29T22:00:00.000Z"),  # Sep 30 local
+        ],
+        as_of=date(2026, 10, 15),
+        interest_rules={"acc-a": InterestRule(expected="quarterly")},
+    )
+    [finding] = checks(result, "missing_interest_quarter")
+
+    # Q4 is still running on Oct 15, so only Q2 is missing.
+    assert finding["evidence"] == {"quarters": ["2026-Q2"]}

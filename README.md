@@ -171,8 +171,9 @@ TOOL_SEARCH_MAX_RESULTS=5
 # JSON object keyed by Ghostfolio account ID; every section is optional.
 #   interest.attribution: "payment_date" (default) or "previous_month" - the
 #     month a payment is booked in under interest_attribution=accrual
-#   interest.expected: "none" (default), "daily" or "monthly" - the known
-#     payment cadence; days or months without interest are flagged. Set
+#   interest.expected: "none" (default), "daily", "monthly" or "quarterly" -
+#     the known payment cadence; days, months or quarters without interest
+#     are flagged. Set
 #     "none" explicitly for an account that pays no interest, so the audit
 #     does not flag its cash (left unset, the account is still checked)
 #   tax.excluded: true leaves the account out of realized gains (e.g. a pension plan)
@@ -616,7 +617,7 @@ Definitions, per chart day `d` with netPerformance `NP`, value `V` and total inv
 
 With no flows in a month, `twr` equals `modified_dietz`. If money is earned on zero capital (a full sale), `twr` is `null` and the day is listed in `undefined_return_days`.
 
-Flags per month: `partial_month`, `sell_days`, `missing_interest_accounts`, `invariant_breaks`, `chart_gaps`, `boundary_gap` (a missing day across a month boundary, so a delta mixes two months), `calendar_mismatches` and `undefined_return_days`.
+Flags per month: `partial_month`, `sell_days`, `missing_interest_accounts` (daily and monthly payers without interest that month; quarterly payers in a quarter's last month when the quarter had none), `invariant_breaks`, `chart_gaps`, `boundary_gap` (a missing day across a month boundary, so a delta mixes two months), `calendar_mismatches` and `undefined_return_days`.
 
 The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees + interest_fees = 0` within 0.01. It is expected to break on sell days, by the realized gain on Ghostfolio's own (average) cost basis; on those days the flow `F` equals minus the sale proceeds. A break equal to that day's interest (`hint: matches_interest`) means Ghostfolio started counting interest inside netPerformance. Breaks are reported, never corrected.
 
@@ -632,7 +633,7 @@ The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees + interest_fees = 
 | `price_far_from_close` | warn | The price is more than 5% from the close on the day Ghostfolio books the trade |
 | `duplicate_activity` | error | Same account, type, asset, local date, quantity, price and fee |
 | `interest_day_conflict` | warn | A daily payer with two payments on one day, usually next to a day with none |
-| `missing_interest_day` / `missing_interest_month` | warn | A gap in a daily or monthly payer's interest (`interest.expected` in `ACCOUNT_PROFILES`). Daily cadence is checked per kind of interest, and only for a kind paid on at least half the days of its span |
+| `missing_interest_day` / `missing_interest_month` / `missing_interest_quarter` | warn | A gap in a daily, monthly or quarterly payer's interest (`interest.expected` in `ACCOUNT_PROFILES`). Daily cadence is checked per kind of interest, and only for a kind paid on at least half the days of its span |
 | `cash_without_interest` | info | Cash above 100 with no interest in 190 days; skipped for accounts whose profile sets `interest.expected` to `"none"` explicitly |
 | `stale_balance` | info | Cash above 100 and no balance snapshot in 45 days |
 | `stale_price` | warn | A held asset whose last real (not carried-forward) close is over 5 days old |

@@ -26,9 +26,11 @@ Checks (``METHOD_VERSION`` changes whenever one is added or its rule changes):
   quantity, price and fee.
 - ``interest_day_conflict`` (warn) - a daily interest payer with more than one
   payment of the same kind on one local day.
-- ``missing_interest_day`` / ``missing_interest_month`` (warn) - a daily or
-  monthly payer (``InterestRule.expected``) with a day or month without
-  interest between its first payment and ``as_of``. Daily cadence is judged
+- ``missing_interest_day`` / ``missing_interest_month`` /
+  ``missing_interest_quarter`` (warn) - a daily, monthly or quarterly payer
+  (``InterestRule.expected``) with a day, month or calendar quarter without
+  interest between its first payment and the last complete period before
+  ``as_of``. Daily cadence is judged
   per kind of interest (asset): only a kind paid on at least half the days of
   its span counts as daily, so occasional lending income is not checked.
 - ``cash_without_interest`` (info) - an account holding cash that paid no
@@ -78,7 +80,7 @@ from ghostfolio_mcp.analytics.common import shift_month
 from ghostfolio_mcp.analytics.monthly_returns import ReturnsConfig
 from ghostfolio_mcp.analytics.monthly_returns import compute_monthly_returns
 
-METHOD_VERSION = "audit/2"
+METHOD_VERSION = "audit/3"
 
 SUPPORTED_ACTIVITY_TYPES = frozenset({"BUY", "SELL", "INTEREST"})
 
@@ -359,6 +361,24 @@ def _check_duplicates(activities: list[Activity]) -> list[dict[str, Any]]:
     ]
 
 
+def _quarter_of(day: date) -> tuple[int, int]:
+    return day.year, (day.month - 1) // 3 + 1
+
+
+def _previous_quarter(quarter: tuple[int, int]) -> tuple[int, int]:
+    year, number = quarter
+    return (year, number - 1) if number > 1 else (year - 1, 4)
+
+
+def _next_quarter(quarter: tuple[int, int]) -> tuple[int, int]:
+    year, number = quarter
+    return (year, number + 1) if number < 4 else (year + 1, 1)
+
+
+def _quarter_label(quarter: tuple[int, int]) -> str:
+    return f"{quarter[0]}-Q{quarter[1]}"
+
+
 def _check_daily_interest(
     paid: list[Activity], account: tuple[str, str], as_of: date
 ) -> list[dict[str, Any]]:
@@ -466,6 +486,25 @@ def _check_interest(
                             evidence={"months": missing_months},
                         )
                     )
+        elif rule.expected == "quarterly":
+            paid_quarters = {_quarter_of(a.local_date) for a in paid}
+            last_complete = _previous_quarter(_quarter_of(as_of))
+            quarter = min(paid_quarters)
+            missing_quarters = []
+            while quarter <= last_complete:
+                if quarter not in paid_quarters:
+                    missing_quarters.append(_quarter_label(quarter))
+                quarter = _next_quarter(quarter)
+            if missing_quarters:
+                findings.append(
+                    _finding(
+                        "missing_interest_quarter",
+                        "warn",
+                        f"No interest paid in {', '.join(missing_quarters)}",
+                        account=(account_id, name),
+                        evidence={"quarters": missing_quarters},
+                    )
+                )
 
     window_start = as_of - timedelta(days=config.interest_window_days)
     for account in sorted(accounts.values(), key=lambda a: a.id):

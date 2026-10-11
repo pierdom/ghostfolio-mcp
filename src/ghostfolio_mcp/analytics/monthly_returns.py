@@ -84,7 +84,7 @@ __all__ = [
     "parse_chart",
 ]
 
-METHOD_VERSION = "monthly-returns/2"
+METHOD_VERSION = "monthly-returns/3"
 
 SUPPORTED_ACTIVITY_TYPES = frozenset({"BUY", "SELL", "INTEREST"})
 
@@ -368,6 +368,31 @@ def compute_monthly_returns(
         for account_id, rule in config.interest_rules.items()
         if rule.expected in ("daily", "monthly")
     )
+    expected_quarterly = sorted(
+        account_id
+        for account_id, rule in config.interest_rules.items()
+        if rule.expected == "quarterly"
+    )
+
+    def missing_interest(month: str) -> list[str]:
+        """Payers due in ``month`` that have no interest attributed to it.
+
+        A quarterly payer is due in the last month of a calendar quarter and
+        counts as paid when any month of that quarter inside the window has
+        interest from it (so a quarter starting before the window only sees
+        its later months).
+        """
+        paid_now = interest_by_month.get(month, {})
+        missing = [a for a in expected_monthly if a not in paid_now]
+        _year, number = month_key(month)
+        if number % 3 == 0:
+            quarter = [shift_month(month, -2), shift_month(month, -1), month]
+            missing.extend(
+                a
+                for a in expected_quarterly
+                if not any(a in interest_by_month.get(m, {}) for m in quarter)
+            )
+        return sorted(missing)
 
     def interest_breakdown(per_account: Mapping[str, list[float]]) -> list[dict]:
         return [
@@ -414,9 +439,7 @@ def compute_monthly_returns(
                 "flags": {
                     "partial_month": covered_end < last,
                     "sell_days": sorted(sell_days_by_month.get(month, set())),
-                    "missing_interest_accounts": [
-                        a for a in expected_monthly if a not in per_account
-                    ],
+                    "missing_interest_accounts": missing_interest(month),
                     "invariant_breaks": breaks_by_month.get(month, []),
                     "chart_gaps": gaps_by_month.get(month, []),
                     "boundary_gap": month in boundary_gaps,

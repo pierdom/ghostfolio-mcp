@@ -197,3 +197,29 @@ async def test_bad_arguments_are_refused_before_any_request(server, arguments, m
     with pytest.raises(ToolError, match=message):
         await call(mcp, arguments)
     assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_only_configured_interest_settings_are_echoed(fake_ghostfolio):
+    from ghostfolio_mcp.models import Modelo720Profile
+
+    call_tool, _requests = fake_ghostfolio(
+        {
+            "/api/v2/portfolio/performance/": lambda request: {
+                "chart": CHARTS[request.url.params["range"]]
+            },
+            "/api/v1/activities/": {"activities": [], "count": 0},
+        },
+        account_profiles={
+            "acc-q": AccountProfile(interest=InterestRuleConfig(expected="quarterly")),
+            "acc-f": AccountProfile(modelo720=Modelo720Profile(foreign=True)),
+        },
+    )
+
+    result = await call_tool(
+        "get_monthly_returns", {"start_month": "2026-04", "end_month": "2026-04"}
+    )
+
+    assert result["config"]["interest_rules"] == {
+        "acc-q": {"attribution": "payment_date", "expected": "quarterly"}
+    }

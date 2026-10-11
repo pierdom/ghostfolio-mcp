@@ -67,12 +67,19 @@ def _check_timezone(timezone: str) -> None:
 
 
 def _interest_rules(config: GhostfolioConfig) -> dict[str, InterestRule]:
+    """Interest rules of the accounts whose profile has an interest section.
+
+    An account without one gets the defaults wherever a rule is looked up;
+    leaving it out here keeps the echoed config to what was configured, so
+    an account is not shown as paying no interest just because it isn't set.
+    """
     return {
         account_id: InterestRule(
             attribution=profile.interest.attribution,
             expected=profile.interest.expected,
         )
         for account_id, profile in config.account_profiles.items()
+        if "interest" in profile.model_fields_set
     }
 
 

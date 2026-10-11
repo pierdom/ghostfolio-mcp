@@ -11,7 +11,7 @@ class InterestRuleConfig(BaseModel):
         "payment_date",
         description="Month interest is attributed to under 'accrual' attribution",
     )
-    expected: Literal["none", "daily", "monthly"] = Field(
+    expected: Literal["none", "daily", "monthly", "quarterly"] = Field(
         "none",
         description="Known payment cadence; a day or month without interest is flagged",
     )

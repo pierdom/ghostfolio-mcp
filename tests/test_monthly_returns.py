@@ -484,3 +484,24 @@ def test_fee_on_interest_is_reported_apart_and_keeps_the_invariant():
     assert month["market_pnl_gross"] == 0.0
     assert month["interest"] == 0.08
     assert month["total_gross"] == 0.08
+
+
+def test_quarterly_payer_is_due_only_at_quarter_end():
+    chart = build_chart("2026-05-31", flat_days(122))  # Jun 1 .. Sep 30
+    result = run(
+        chart,
+        [activity("q2", "INTEREST", "2026-06-29T22:00:00.000Z", 0.05, account="acc-q")],
+        start="2026-06",
+        end="2026-09",
+        interest_rules={"acc-q": InterestRule(expected="quarterly")},
+    )
+    missing = {
+        m["month"]: m["flags"]["missing_interest_accounts"] for m in result["months"]
+    }
+
+    assert missing == {
+        "2026-06": [],
+        "2026-07": [],
+        "2026-08": [],
+        "2026-09": ["acc-q"],
+    }

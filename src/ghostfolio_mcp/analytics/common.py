@@ -76,7 +76,7 @@ class InterestRule:
     """
 
     attribution: Literal["payment_date", "previous_month"] = "payment_date"
-    expected: Literal["none", "daily", "monthly"] = "none"
+    expected: Literal["none", "daily", "monthly", "quarterly"] = "none"
 
 
 @dataclass(frozen=True)
