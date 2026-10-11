@@ -75,6 +75,13 @@ class GhostfolioConfig(BaseModel):
         default_factory=dict,
         description="Per-account analytics settings keyed by Ghostfolio account ID",
     )
+    homogeneous_groups: list[list[str]] = Field(
+        default_factory=list,
+        description=(
+            "Groups of DATASOURCE:SYMBOL counted as one asset by the two-month "
+            "rule of get_realized_gains (equivalent securities)"
+        ),
+    )
     default_benchmark: str | None = Field(
         None,
         description="Benchmark as DATASOURCE:SYMBOL when a tool is not given one",

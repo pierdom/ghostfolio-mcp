@@ -5,6 +5,7 @@ from datetime import date
 
 import pytest
 
+from ghostfolio_mcp.analytics.common import PricePoint
 from ghostfolio_mcp.analytics.common import parse_activities
 from ghostfolio_mcp.analytics.realized_gains import METHOD_VERSION
 from ghostfolio_mcp.analytics.realized_gains import GainsConfig
@@ -41,10 +42,22 @@ def trade(
     }
 
 
-def run(activities, year=None, **config):
+def run(
+    activities,
+    year=None,
+    prices=None,
+    as_of=None,
+    include_open_lot_detail=False,
+    **config,
+):
     config.setdefault("timezone", TZ)
     return compute_realized_gains(
-        parse_activities(activities, TZ, "UTC"), GainsConfig(**config), year
+        parse_activities(activities, TZ, "UTC"),
+        GainsConfig(**config),
+        year,
+        prices=prices,
+        as_of=as_of,
+        include_open_lot_detail=include_open_lot_detail,
     )
 
 
@@ -70,7 +83,18 @@ def test_fifo_across_accounts_with_fees():
     ]
     assert [lot["holding_days"] for lot in sale["lots"]] == [151, 120]
     assert result["open_lots"] == [
-        {"security": "YAHOO:ETF", "quantity": 0.5, "cost": 1.0, "lots": 1}
+        {
+            "security": "YAHOO:ETF",
+            "quantity": 0.5,
+            "cost": 1.0,
+            "lots": 1,
+            # Not valued: no prices were given.
+            "market_price": None,
+            "price_date": None,
+            "market_value": None,
+            "unrealized_gain": None,
+            "unrealized_pct": None,
+        }
     ]
 
 
@@ -146,6 +170,7 @@ def test_shares_left_from_an_earlier_buy_count_for_the_two_month_rule():
             "activity_id": "b1",
             "date": "2026-02-10",
             "account_id": "acc-a",
+            "security": "YAHOO:ETF",
             "quantity_held": 2.0,
         }
     ]
@@ -252,3 +277,101 @@ def test_output_is_byte_identical_and_order_independent():
     second = run(activities[::-1])
 
     assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+
+# --- realized-gains/2 --------------------------------------------------------
+
+
+def point(day, price):
+    return PricePoint(date.fromisoformat(day), price)
+
+
+def open_position():
+    return [
+        trade("b1", "BUY", "2026-01-10T10:00:00Z", 2, 1.0, fee=0.02),
+        trade("b2", "BUY", "2026-03-10T10:00:00Z", 1, 1.5, account="acc-b"),
+        trade("s1", "SELL", "2026-04-10T10:00:00Z", 1, 2.0),
+    ]
+
+
+def test_open_lots_are_valued_at_the_last_close_on_or_before_as_of():
+    result = run(
+        open_position(),
+        prices={"YAHOO:ETF": [point("2026-08-28", 2.0), point("2026-09-01", 9.0)]},
+        as_of=date(2026, 8, 31),
+    )
+    [lot] = result["open_lots"]
+
+    # Left: 1 share of b1 (cost 1.01 incl. half the fee) + 1 of b2 (1.50).
+    assert lot["quantity"] == 2.0
+    assert lot["cost"] == 2.51
+    assert lot["market_price"] == 2.0
+    assert lot["price_date"] == "2026-08-28"
+    assert lot["market_value"] == 4.0
+    assert lot["unrealized_gain"] == 1.49
+    assert lot["unrealized_pct"] == pytest.approx(1.49 / 2.51, abs=1e-8)
+    assert "lot_detail" not in lot
+    assert result["valuation_date"] == "2026-08-31"
+
+
+def test_open_lot_detail_is_in_fifo_order_with_prorated_fees():
+    result = run(
+        open_position(),
+        prices={"YAHOO:ETF": [point("2026-08-31", 2.0)]},
+        as_of=date(2026, 8, 31),
+        include_open_lot_detail=True,
+    )
+    [lot] = result["open_lots"]
+
+    assert lot["lot_detail"] == [
+        {
+            "buy_activity_id": "b1",
+            "buy_date": "2026-01-10",
+            "account_id": "acc-a",
+            "quantity": 1.0,
+            "cost": 1.01,
+            "holding_days": 233,
+            "market_value": 2.0,
+            "unrealized_gain": 0.99,
+            "unrealized_pct": pytest.approx(0.99 / 1.01, abs=1e-8),
+        },
+        {
+            "buy_activity_id": "b2",
+            "buy_date": "2026-03-10",
+            "account_id": "acc-b",
+            "quantity": 1.0,
+            "cost": 1.5,
+            "holding_days": 174,
+            "market_value": 2.0,
+            "unrealized_gain": 0.5,
+            "unrealized_pct": pytest.approx(0.5 / 1.5, abs=1e-8),
+        },
+    ]
+    assert result["config"]["include_open_lot_detail"] is True
+
+
+def test_homogeneous_group_extends_the_two_month_rule():
+    activities = [
+        trade("b1", "BUY", "2026-01-10T10:00:00Z", 1, 2.0, symbol="ETF"),
+        trade("s1", "SELL", "2026-03-10T10:00:00Z", 1, 1.0, symbol="ETF"),
+        # Same index, other listing, bought within two months.
+        trade("b2", "BUY", "2026-04-01T10:00:00Z", 1, 1.0, symbol="ETF2"),
+    ]
+
+    plain = run(activities)["sales"][0]
+    grouped = run(activities, homogeneous_groups=[["YAHOO:ETF", "YAHOO:ETF2"]])
+
+    assert plain["flags"]["wash_sale"] is None
+    wash = grouped["sales"][0]["flags"]["wash_sale"]
+    assert wash["buys"] == [
+        {
+            "activity_id": "b2",
+            "date": "2026-04-01",
+            "account_id": "acc-a",
+            "security": "YAHOO:ETF2",
+            "quantity_held": 1.0,
+        }
+    ]
+    assert grouped["config"]["homogeneous_groups"] == [["YAHOO:ETF", "YAHOO:ETF2"]]
+    # Lots are still matched per asset.
+    assert grouped["sales"][0]["cost"] == 2.0

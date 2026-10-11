@@ -221,3 +221,44 @@ def test_output_is_byte_identical_and_versioned():
     assert first["method_version"] == METHOD_VERSION
     assert first["config"]["benchmark"] == BENCH
     assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+
+# --- benchmark/2 -------------------------------------------------------------
+
+
+def test_monthly_reset_and_continuous_summary_are_both_explicit():
+    # The portfolio stays flat at 1.00; the benchmark goes 1 -> 2 in April and
+    # 2 -> 3 in May. April's holding is 1 unit (P&L 1.00). May restarts from
+    # the portfolio's 1.00 at 2.00: 0.5 units (P&L 0.50). The continuous
+    # holding keeps 1 unit throughout (P&L 2.00).
+    prices = closes("2026-03-31", [1.0] * 10 + [2.0] * 30 + [3.0] * 22)
+    result = run(chart("2026-03-31", flat(61)), prices, end="2026-05")
+    april, may = result["months"]
+    summary = result["summary"]
+
+    assert result["config"]["benchmark_reset"] == "monthly"
+    assert summary["benchmark_mode"] == "continuous"
+    assert (april["benchmark_pnl"], may["benchmark_pnl"]) == (1.0, 0.5)
+    assert summary["benchmark_pnl_sum_of_months"] == 1.5
+    assert summary["benchmark_pnl"] == 2.0
+    assert may["benchmark_units_end"] == 0.5
+    assert summary["benchmark_units_end"] == 1.0
+
+
+def test_partial_cash_coverage_is_flagged_with_a_ratio():
+    moves = [(0.0, 0.0, 0.0)] * 9 + [(0.0, 0.0, 2.0)] * 52
+    rows = chart("2026-03-31", moves)
+    prices = closes("2026-03-31", [1.0 + 0.01 * i for i in range(62)])
+    april, may = run(rows, prices, end="2026-05", cash_known_from=date(2026, 4, 10))[
+        "months"
+    ]
+    summary = run(rows, prices, end="2026-05", cash_known_from=date(2026, 4, 10))[
+        "summary"
+    ]
+
+    assert april["cash"]["coverage_ratio"] == pytest.approx(20 / 30, abs=1e-8)
+    assert april["flags"]["cash_coverage_partial"] is True
+    assert may["cash"]["coverage_ratio"] == 1.0
+    assert may["flags"]["cash_coverage_partial"] is False
+    assert summary["cash"]["coverage_ratio"] == pytest.approx(51 / 61, abs=1e-8)
+    assert summary["flags"]["cash_coverage_partial"] is True

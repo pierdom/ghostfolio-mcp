@@ -81,7 +81,7 @@ from ghostfolio_mcp.analytics.common import shift_month
 from ghostfolio_mcp.analytics.monthly_returns import ReturnsConfig
 from ghostfolio_mcp.analytics.monthly_returns import compute_monthly_returns
 
-METHOD_VERSION = "audit/4"
+METHOD_VERSION = "audit/5"
 
 SUPPORTED_ACTIVITY_TYPES = frozenset({"BUY", "SELL", "INTEREST"})
 
@@ -107,6 +107,22 @@ class BalanceSnapshot:
 
 
 @dataclass(frozen=True)
+class ExpectedDividend:
+    """A distribution the data provider reports for a position held on its ex-date.
+
+    From ``GET /api/v1/import/dividends/<dataSource>/<symbol>``, which
+    Ghostfolio builds from the provider's dividend history and the user's
+    holdings on each ex-date.
+    """
+
+    security: str
+    ex_date: date
+    account_id: str | None
+    quantity: float
+    per_share: float
+
+
+@dataclass(frozen=True)
 class AuditConfig:
     timezone: str = "Europe/Madrid"
     chart_timezone: str = "UTC"
@@ -114,22 +130,28 @@ class AuditConfig:
     interest_rules: Mapping[str, InterestRule] = field(default_factory=dict)
     # Accounts explicitly configured as paying no interest.
     no_interest_accounts: Collection[str] = field(default_factory=frozenset)
-    # A price nearer one candidate date's close than the other's by at least
-    # this share of the close decides the trade date.
-    trade_date_min_gap: float = 0.002
+    # A trade date is decided from intraday prices only when the price is
+    # nearer one day's close by at least this share of the close, and the
+    # other day's distance is at least trade_date_min_ratio times as large.
+    trade_date_min_gap: float = 0.005
+    trade_date_min_ratio: float = 2.0
     # A mean distance this small means the price is that day's close.
     trade_date_exact_gap: float = 0.0005
     price_far_ratio: float = 0.05
     interest_window_days: int = 190
     # Days before as_of a daily payment may still be missing: payments are
-    # often recorded the next day.
-    daily_interest_grace_days: int = 1
+    # often imported a day or two later.
+    daily_interest_grace_days: int = 2
     cash_threshold: float = 100.0
     stale_balance_days: int = 45
     stale_price_days: int = 5
     seed_gap_days: int = 180
     seed_share: float = 0.01
     invariant_tolerance: float = 0.01
+    # A DIVIDEND activity this many days before to this many after an ex-date
+    # records that distribution (payment usually follows the ex-date).
+    dividend_window_before_days: int = 3
+    dividend_window_after_days: int = 30
 
 
 def _finding(
@@ -271,9 +293,11 @@ def _check_trade_dates(
         }
         if not usable:
             continue
+        confidence = None
         if len(usable) == 1:
             verdict_label = usable[0]
             reason = "the only trading day of the two"
+            confidence = "high"
         else:
             mean = {
                 label: math.fsum(gaps[label]) / len(gaps[label]) for label in usable
@@ -284,9 +308,14 @@ def _check_trade_dates(
             if mean[nearer] <= config.trade_date_exact_gap < mean[other]:
                 verdict_label = nearer
                 reason = "the price is this day's close"
-            elif mean[other] - mean[nearer] >= config.trade_date_min_gap:
+                confidence = "high"
+            elif (
+                mean[other] - mean[nearer] >= config.trade_date_min_gap
+                and mean[other] >= config.trade_date_min_ratio * mean[nearer]
+            ):
                 verdict_label = nearer
                 reason = "the price is nearer this day's close"
+                confidence = "low"
             else:
                 verdict_label = None
                 reason = ""
@@ -305,7 +334,7 @@ def _check_trade_dates(
                     "info",
                     "Timestamp falls between local and UTC midnight and the price "
                     f"does not tell which day the trade was{batch}",
-                    evidence={**evidence, "verdict": "ambiguous"},
+                    evidence={**evidence, "verdict": "ambiguous", "confidence": None},
                     **common,
                 )
             )
@@ -317,7 +346,11 @@ def _check_trade_dates(
                     f"Traded on {first.local_date.isoformat()} ({reason}) but "
                     f"Ghostfolio books it on {first.chart_date.isoformat()}, a day "
                     f"early, because the timestamp is local midnight{batch}",
-                    evidence={**evidence, "verdict": "booked_day_before_trade"},
+                    evidence={
+                        **evidence,
+                        "verdict": "booked_day_before_trade",
+                        "confidence": confidence,
+                    },
                     **common,
                 )
             )
@@ -329,7 +362,11 @@ def _check_trade_dates(
                     f"Traded on {first.chart_date.isoformat()} ({reason}), as "
                     "Ghostfolio books it, but its local date is "
                     f"{first.local_date.isoformat()}, a day late{batch}",
-                    evidence={**evidence, "verdict": "local_date_after_trade"},
+                    evidence={
+                        **evidence,
+                        "verdict": "local_date_after_trade",
+                        "confidence": confidence,
+                    },
                     **common,
                 )
             )
@@ -406,36 +443,70 @@ def _check_daily_interest(
         per_day: dict[date, list[Activity]] = defaultdict(list)
         for activity in payments:
             per_day[activity.local_date].append(activity)
+        explained: set[date] = set()
         for day, group in sorted(per_day.items()):
             if len(group) < 2:
                 continue
-            neighbours = [
-                d
-                for d in (day - timedelta(days=1), day + timedelta(days=1))
-                if d not in paid_days and first <= d <= as_of
-            ]
+            group.sort(key=lambda a: (parse_timestamp(a.timestamp), a.id))
+            # Prefer the following day: a payment recorded early is the more
+            # common slip, and imports land after midnight.
+            empty = next(
+                (
+                    d
+                    for d in (day + timedelta(days=1), day - timedelta(days=1))
+                    if d not in paid_days and d not in explained and first <= d <= as_of
+                ),
+                None,
+            )
+            if empty is None:
+                findings.append(
+                    _finding(
+                        "interest_day_conflict",
+                        "warn",
+                        f"{len(group)} payments on one day from a daily payer",
+                        dates=[day],
+                        activities=group,
+                        account=account,
+                        security=security,
+                        evidence={"amounts": [money(a.amount) for a in group]},
+                    )
+                )
+                continue
+            explained.add(empty)
+            move = group[-1] if empty > day else group[0]
             findings.append(
                 _finding(
-                    "interest_day_conflict",
+                    "interest_misdated",
                     "warn",
-                    f"{len(group)} payments on one day from a daily payer"
-                    + (
-                        f"; {neighbours[0].isoformat()} next to it has none, so "
-                        "one is probably misdated"
-                        if neighbours
-                        else ""
-                    ),
-                    dates=[day, *neighbours],
+                    f"{len(group)} payments on {day.isoformat()} and none on "
+                    f"{empty.isoformat()}: one of them is probably misdated; move "
+                    f"{move.id} to {empty.isoformat()}",
+                    dates=[day, empty],
                     activities=group,
                     account=account,
                     security=security,
-                    evidence={"amounts": [money(a.amount) for a in group]},
+                    evidence={
+                        "payments": [
+                            {
+                                "activity_id": a.id,
+                                "timestamp": a.timestamp,
+                                "amount": money(a.amount),
+                            }
+                            for a in group
+                        ],
+                        "empty_date": empty.isoformat(),
+                        "suggestion": {
+                            "activity_id": move.id,
+                            "move_to": empty.isoformat(),
+                        },
+                    },
                 )
             )
         missing = [
             first + timedelta(days=i)
             for i in range((as_of - first).days + 1)
             if first + timedelta(days=i) not in paid_days
+            and first + timedelta(days=i) not in explained
         ]
         if missing:
             findings.append(
@@ -463,9 +534,49 @@ def _check_interest(
         if activity.type == "INTEREST" and activity.local_date <= as_of:
             interest_by_account[activity.account_id].append(activity)
 
+    excluded = {a.id for a in accounts.values() if a.excluded_from_analysis}
+    names = {a.id: a.name for a in accounts.values()}
+
+    for account_id in sorted(config.no_interest_accounts):
+        paid = interest_by_account.get(account_id, [])
+        if account_id in excluded or not paid:
+            continue
+        dates = sorted(a.local_date for a in paid)
+        findings.append(
+            _finding(
+                "interest_rule_contradiction",
+                "info",
+                f"Configured as paying no interest, but {len(paid)} interest "
+                f"payment(s) totalling {money(math.fsum(a.amount for a in paid))} "
+                "are recorded; set interest.expected to its real cadence",
+                dates=[dates[0], dates[-1]],
+                account=(account_id, paid[0].account_name),
+                evidence={
+                    "expected": "none",
+                    "payments": len(paid),
+                    "total": money(math.fsum(a.amount for a in paid)),
+                    "first_payment": dates[0].isoformat(),
+                    "last_payment": dates[-1].isoformat(),
+                },
+            )
+        )
+
     for account_id, rule in sorted(config.interest_rules.items()):
+        if account_id in excluded:
+            continue
         paid = interest_by_account.get(account_id, [])
         if not paid:
+            if rule.expected in ("daily", "monthly", "quarterly"):
+                findings.append(
+                    _finding(
+                        "interest_rule_contradiction",
+                        "info",
+                        f"Configured as paying interest {rule.expected}, but no "
+                        "interest payment is recorded",
+                        account=(account_id, names.get(account_id, "")),
+                        evidence={"expected": rule.expected, "payments": 0},
+                    )
+                )
             continue
         name = paid[0].account_name
         if rule.expected == "daily":
@@ -521,6 +632,7 @@ def _check_interest(
         if (
             account.balance <= config.cash_threshold
             or account.id in config.no_interest_accounts
+            or account.excluded_from_analysis
         ):
             continue
         recent = [
@@ -566,7 +678,7 @@ def _check_balances(
             )
     findings = []
     for account in sorted(accounts.values(), key=lambda a: a.id):
-        if account.balance <= config.cash_threshold:
+        if account.balance <= config.cash_threshold or account.excluded_from_analysis:
             continue
         latest = last.get(account.id)
         age = (as_of - latest).days if latest else None
@@ -688,6 +800,76 @@ def _check_chart(
     return findings
 
 
+def _check_distributions(
+    activities: list[Activity],
+    expected: list[ExpectedDividend],
+    unavailable: list[str],
+    config: AuditConfig,
+    as_of: date,
+) -> list[dict[str, Any]]:
+    names = {a.account_id: a.account_name for a in activities}
+    findings = []
+    for item in sorted(
+        expected, key=lambda e: (e.security, e.ex_date, e.account_id or "")
+    ):
+        if item.ex_date > as_of:
+            continue
+        start = item.ex_date - timedelta(days=config.dividend_window_before_days)
+        end = item.ex_date + timedelta(days=config.dividend_window_after_days)
+        recorded = [
+            a
+            for a in activities
+            if a.type == "DIVIDEND"
+            and a.security == item.security
+            and (item.account_id is None or a.account_id == item.account_id)
+            and start <= a.local_date <= end
+        ]
+        if recorded:
+            continue
+        held = math.fsum(
+            a.quantity if a.type == "BUY" else -a.quantity
+            for a in activities
+            if a.type in ("BUY", "SELL")
+            and a.security == item.security
+            and (item.account_id is None or a.account_id == item.account_id)
+            and a.local_date < item.ex_date
+        )
+        gross = item.quantity * item.per_share
+        findings.append(
+            _finding(
+                "missing_distribution",
+                "warn",
+                f"No DIVIDEND recorded for the {item.ex_date.isoformat()} "
+                f"distribution of {item.per_share} per share on "
+                f"{quantity(item.quantity)} shares (about {money(gross)})",
+                dates=[item.ex_date],
+                account=(item.account_id, names.get(item.account_id, ""))
+                if item.account_id
+                else None,
+                security=item.security,
+                evidence={
+                    "ex_date": item.ex_date.isoformat(),
+                    "per_share": item.per_share,
+                    "shares": quantity(item.quantity),
+                    "shares_from_activities": quantity(held),
+                    "expected_gross": money(gross),
+                    "window": [start.isoformat(), end.isoformat()],
+                },
+            )
+        )
+    if unavailable:
+        findings.append(
+            _finding(
+                "dividend_data_unavailable",
+                "info",
+                f"Dividend history could not be read for {len(unavailable)} asset(s), "
+                "so missing distributions were not checked for them",
+                evidence={"securities": sorted(unavailable)},
+            )
+        )
+    return findings
+
+
 def _check_seed(
     activities: list[Activity], config: AuditConfig
 ) -> list[dict[str, Any]]:
@@ -801,6 +983,8 @@ def audit_portfolio(
     rows: list[ChartRow],
     config: AuditConfig,
     as_of: date,
+    expected_dividends: list[ExpectedDividend] | None = None,
+    dividend_sources_unavailable: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run every check and return the findings, most severe first.
 
@@ -824,6 +1008,13 @@ def audit_portfolio(
         *_check_balances(by_id, snapshots, config, as_of),
         *_check_prices(known, prices, config, as_of),
         *_check_chart(rows, known, config),
+        *_check_distributions(
+            known,
+            list(expected_dividends or []),
+            list(dividend_sources_unavailable or []),
+            config,
+            as_of,
+        ),
         *_check_seed(known, config),
         *_check_styles(known, config),
         *_check_misc(known, isins, config),
@@ -863,6 +1054,9 @@ def audit_portfolio(
                 "seed_gap_days": config.seed_gap_days,
                 "seed_share": config.seed_share,
                 "invariant_tolerance": config.invariant_tolerance,
+                "trade_date_min_ratio": config.trade_date_min_ratio,
+                "dividend_window_before_days": config.dividend_window_before_days,
+                "dividend_window_after_days": config.dividend_window_after_days,
             },
         },
         "summary": {
@@ -898,3 +1092,24 @@ def parse_balance_snapshots(
         ),
         key=lambda s: (s.account_id, s.date),
     )
+
+
+def parse_expected_dividends(
+    security: str, raw_activities: list[Mapping[str, Any]]
+) -> list[ExpectedDividend]:
+    """Parse ``activities`` of ``GET /api/v1/import/dividends/<ds>/<symbol>``.
+
+    Their date is the ex-date at UTC midnight; ``quantity`` is the shares held
+    then and ``unitPrice`` the amount per share.
+    """
+    return [
+        ExpectedDividend(
+            security=security,
+            ex_date=datetime.fromisoformat(str(raw["date"])).date(),
+            account_id=raw.get("accountId") or None,
+            quantity=float(raw.get("quantity") or 0),
+            per_share=float(raw.get("unitPrice") or 0),
+        )
+        for raw in raw_activities
+        if raw.get("type", "DIVIDEND") == "DIVIDEND"
+    ]

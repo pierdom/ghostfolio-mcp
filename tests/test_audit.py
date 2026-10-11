@@ -4,12 +4,16 @@ import json
 from datetime import date
 from datetime import timedelta
 
+import pytest
+
 from ghostfolio_mcp.analytics.audit import METHOD_VERSION
 from ghostfolio_mcp.analytics.audit import AccountInfo
 from ghostfolio_mcp.analytics.audit import AuditConfig
 from ghostfolio_mcp.analytics.audit import BalanceSnapshot
+from ghostfolio_mcp.analytics.audit import ExpectedDividend
 from ghostfolio_mcp.analytics.audit import audit_portfolio
 from ghostfolio_mcp.analytics.audit import parse_balance_snapshots
+from ghostfolio_mcp.analytics.audit import parse_expected_dividends
 from ghostfolio_mcp.analytics.common import InterestRule
 from ghostfolio_mcp.analytics.common import PricePoint
 from ghostfolio_mcp.analytics.common import parse_activities
@@ -146,6 +150,7 @@ def test_trade_on_utc_date_with_a_late_local_date_is_info():
 
     assert finding["severity"] == "info"
     assert finding["evidence"]["verdict"] == "local_date_after_trade"
+    assert finding["evidence"]["confidence"] == "low"
 
 
 def test_price_between_both_closes_is_ambiguous():
@@ -217,13 +222,23 @@ def test_daily_payer_double_day_next_to_a_missing_day():
         ),
         interest_rules={"acc-a": InterestRule(expected="daily")},
     )
-    [conflict] = checks(result, "interest_day_conflict")
-    [missing] = checks(result, "missing_interest_day")
+    [misdated] = checks(result, "interest_misdated")
 
-    assert conflict["dates"] == ["2026-08-10", "2026-08-11"]
-    assert conflict["activity_ids"] == ["i-2026-08-10", "j-2026-08-10"]
-    assert "misdated" in conflict["message"]
-    assert missing["dates"] == ["2026-08-11"]
+    # One finding for one root cause: no separate conflict or missing day.
+    assert checks(result, "interest_day_conflict") == []
+    assert checks(result, "missing_interest_day") == []
+    assert misdated["severity"] == "warn"
+    assert misdated["dates"] == ["2026-08-10", "2026-08-11"]
+    assert misdated["activity_ids"] == ["i-2026-08-10", "j-2026-08-10"]
+    assert [p["activity_id"] for p in misdated["evidence"]["payments"]] == [
+        "i-2026-08-10",
+        "j-2026-08-10",
+    ]
+    # The empty day follows, so the later payment is the one to move.
+    assert misdated["evidence"]["suggestion"] == {
+        "activity_id": "j-2026-08-10",
+        "move_to": "2026-08-11",
+    }
 
 
 def test_monthly_payer_missing_month():
@@ -266,9 +281,9 @@ def test_cash_without_recent_interest_is_info():
     )
     findings = checks(result, "cash_without_interest")
 
-    assert [f["account_id"] for f in findings] == ["acc-a", "acc-b"]
-    assert findings[0]["evidence"]["excluded_from_analysis"] is True
-    assert findings[1]["evidence"]["last_interest_date"] == "2026-01-15"
+    # acc-a is excluded from analysis, acc-c below the threshold.
+    assert [f["account_id"] for f in findings] == ["acc-b"]
+    assert findings[0]["evidence"]["last_interest_date"] == "2026-01-15"
 
 
 # --- staleness ---------------------------------------------------------------
@@ -622,12 +637,246 @@ def test_quarterly_payer_missing_a_quarter():
 
 
 def test_yesterdays_daily_payment_may_still_be_missing():
-    # Paid through Aug 29; AS_OF is Aug 31. Aug 31 is within the one-day
-    # grace, Aug 30 is not.
+    # Paid through Aug 28; AS_OF is Aug 31. Aug 30 and 31 are within the
+    # two-day import grace, Aug 29 is not.
     result = run(
-        daily_interest("2026-08-01", "2026-08-29"),
+        daily_interest("2026-08-01", "2026-08-28"),
         interest_rules={"acc-a": InterestRule(expected="daily")},
     )
     [missing] = checks(result, "missing_interest_day")
 
-    assert missing["dates"] == ["2026-08-30"]
+    assert missing["dates"] == ["2026-08-29"]
+
+
+# --- 2026-10-11 live-testing fixes (audit/5) ---------------------------------
+
+
+def test_misdated_payment_before_an_empty_day_moves_the_earlier_one():
+    result = run(
+        daily_interest(
+            "2026-08-01", "2026-08-31", skip=("2026-08-09",), double=("2026-08-10",)
+        ),
+        interest_rules={"acc-a": InterestRule(expected="daily")},
+    )
+    [misdated] = checks(result, "interest_misdated")
+
+    assert misdated["dates"] == ["2026-08-09", "2026-08-10"]
+    assert misdated["evidence"]["suggestion"] == {
+        "activity_id": "i-2026-08-10",
+        "move_to": "2026-08-09",
+    }
+
+
+def test_double_day_without_an_empty_neighbour_stays_a_conflict():
+    result = run(
+        daily_interest("2026-08-01", "2026-08-31", double=("2026-08-10",)),
+        interest_rules={"acc-a": InterestRule(expected="daily")},
+    )
+
+    assert [f["dates"] for f in checks(result, "interest_day_conflict")] == [
+        ["2026-08-10"]
+    ]
+    assert checks(result, "interest_misdated") == []
+
+
+def test_excluded_accounts_skip_cash_and_interest_checks_but_not_hygiene():
+    excluded = AccountInfo("acc-a", "A", 5.0, excluded_from_analysis=True)
+    result = run(
+        [
+            *daily_interest("2026-08-01", "2026-08-31", skip=("2026-08-11",)),
+            raw("b1", "BUY", "2026-08-05T10:00:00.000Z"),
+            raw("b2", "BUY", "2026-08-05T10:00:00.000Z"),
+        ],
+        accounts=[excluded],
+        snapshots=[BalanceSnapshot("acc-a", date(2026, 1, 1), 5.0)],
+        cash_threshold=1.0,
+        interest_rules={"acc-a": InterestRule(expected="daily")},
+        no_interest_accounts={"acc-a"},
+    )
+    found = {f["check"] for f in result["findings"]}
+
+    assert "missing_interest_day" not in found
+    assert "stale_balance" not in found
+    assert "interest_rule_contradiction" not in found
+    assert "duplicate_activity" in found
+
+
+def test_trade_date_needs_a_large_and_proportionate_gap():
+    def verdict(local_close, booked_close, price):
+        result = run(
+            [raw("b1", "BUY", "2026-07-23T22:00:00.000Z", unit_price=price)],
+            price_map={
+                SECURITY: prices(
+                    ("2026-07-22", 0.5),
+                    ("2026-07-23", booked_close),
+                    ("2026-07-24", local_close),
+                    (str(AS_OF), 1.0),
+                )
+            },
+        )
+        [finding] = checks(result, "trade_date_mismatch")
+        return finding["evidence"]["verdict"], finding["evidence"]["confidence"]
+
+    # 0.2% vs 0.5%: the live Trading212 case - too close to call.
+    assert verdict(1.003, 0.998, 1.0) == ("ambiguous", None)
+    # 0.6% gap difference but only 1.6x: still too close.
+    assert verdict(1.016, 0.99, 1.0) == ("ambiguous", None)
+    # 0.1% vs 1.0%: decided from intraday prices, low confidence.
+    assert verdict(1.01, 1.001, 1.0) == ("local_date_after_trade", "low")
+    # An exact close decides with high confidence.
+    assert verdict(1.0, 1.001, 1.0) == ("booked_day_before_trade", "high")
+
+
+def test_weekend_trade_date_is_conclusive():
+    result = run(
+        [raw("b1", "BUY", "2026-03-29T22:00:00.000Z", unit_price=1.0)],
+        price_map={
+            SECURITY: prices(
+                ("2026-03-27", 1.0),
+                ("2026-03-28", 1.0),
+                ("2026-03-29", 1.0),
+                ("2026-03-30", 1.004),
+                (str(AS_OF), 1.2),
+            )
+        },
+    )
+    [finding] = checks(result, "trade_date_mismatch")
+
+    assert finding["evidence"]["verdict"] == "booked_day_before_trade"
+    assert finding["evidence"]["confidence"] == "high"
+
+
+def test_explicit_no_interest_rule_contradicted_by_payments():
+    result = run(
+        [
+            interest("q1", "2026-03-30T22:00:00.000Z", amount=0.03),
+            interest("q2", "2026-06-29T22:00:00.000Z", amount=0.04),
+        ],
+        no_interest_accounts={"acc-a"},
+    )
+    [finding] = checks(result, "interest_rule_contradiction")
+
+    assert finding["severity"] == "info"
+    assert finding["dates"] == ["2026-03-31", "2026-06-30"]
+    assert finding["evidence"] == {
+        "expected": "none",
+        "payments": 2,
+        "total": 0.07,
+        "first_payment": "2026-03-31",
+        "last_payment": "2026-06-30",
+    }
+
+
+def test_cadence_without_any_payment_is_a_contradiction():
+    result = run(
+        accounts=[AccountInfo("acc-a", "A", 0.0)],
+        interest_rules={"acc-a": InterestRule(expected="monthly")},
+    )
+    [finding] = checks(result, "interest_rule_contradiction")
+
+    assert finding["evidence"] == {"expected": "monthly", "payments": 0}
+    assert finding["account_name"] == "A"
+
+
+def test_unconfigured_accounts_with_interest_are_not_contradictions():
+    result = run([interest("i1", "2026-08-01T10:00:00.000Z")])
+
+    assert checks(result, "interest_rule_contradiction") == []
+
+
+def expected(ex_date, qty=2.0, per_share=0.01, account="acc-a"):
+    return ExpectedDividend(
+        SECURITY, date.fromisoformat(ex_date), account, qty, per_share
+    )
+
+
+def dividend(id_, timestamp, account="acc-a"):
+    return raw(id_, "DIVIDEND", timestamp, quantity=2, unit_price=0.01, account=account)
+
+
+def run_dividends(activities, items):
+    return audit_portfolio(
+        parse_activities(activities, TZ, "UTC"),
+        [],
+        [],
+        {SECURITY: fresh_prices()},
+        {SECURITY: "XX0000000000"},
+        [],
+        AuditConfig(timezone=TZ),
+        AS_OF,
+        expected_dividends=items,
+    )
+
+
+def test_distribution_without_a_dividend_activity_is_flagged():
+    holdings = [raw("b1", "BUY", "2026-06-01T10:00:00.000Z", quantity=2)]
+    result = run_dividends(holdings, [expected("2026-07-16")])
+    [finding] = checks(result, "missing_distribution")
+
+    assert finding["severity"] == "warn"
+    assert finding["security"] == SECURITY
+    assert finding["evidence"] == {
+        "ex_date": "2026-07-16",
+        "per_share": 0.01,
+        "shares": 2.0,
+        "shares_from_activities": 2.0,
+        "expected_gross": 0.02,
+        "window": ["2026-07-13", "2026-08-15"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("recorded_at", "account", "flagged"),
+    [
+        ("2026-07-30T10:00:00.000Z", "acc-a", False),  # paid two weeks later
+        ("2026-07-14T10:00:00.000Z", "acc-a", False),  # dated just before ex
+        ("2026-08-25T10:00:00.000Z", "acc-a", True),  # outside the window
+        ("2026-07-30T10:00:00.000Z", "acc-b", True),  # another account's
+    ],
+)
+def test_dividend_window_and_account(recorded_at, account, flagged):
+    result = run_dividends(
+        [dividend("d1", recorded_at, account=account)], [expected("2026-07-16")]
+    )
+
+    assert bool(checks(result, "missing_distribution")) is flagged
+
+
+def test_future_ex_dates_and_unreadable_sources():
+    result = audit_portfolio(
+        [],
+        [],
+        [],
+        {SECURITY: fresh_prices()},
+        {SECURITY: "XX0000000000"},
+        [],
+        AuditConfig(timezone=TZ),
+        AS_OF,
+        expected_dividends=[expected("2026-09-15")],
+        dividend_sources_unavailable=["YAHOO:GONE"],
+    )
+
+    assert checks(result, "missing_distribution") == []
+    [unavailable] = checks(result, "dividend_data_unavailable")
+    assert unavailable["evidence"] == {"securities": ["YAHOO:GONE"]}
+
+
+def test_expected_dividends_are_parsed_from_the_import_route():
+    items = parse_expected_dividends(
+        SECURITY,
+        [
+            {
+                "date": "2026-07-16T00:00:00.000Z",
+                "type": "DIVIDEND",
+                "quantity": 20,
+                "unitPrice": 1.4,
+                "accountId": "acc-a",
+            },
+            {"date": "2026-08-16T00:00:00.000Z", "quantity": 1, "unitPrice": 2},
+        ],
+    )
+
+    assert items == [
+        ExpectedDividend(SECURITY, date(2026, 7, 16), "acc-a", 20.0, 1.4),
+        ExpectedDividend(SECURITY, date(2026, 8, 16), None, 1.0, 2.0),
+    ]

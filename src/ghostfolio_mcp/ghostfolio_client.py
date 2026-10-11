@@ -293,6 +293,7 @@ def get_ghostfolio_config_from_env() -> GhostfolioConfig:
         tool_search_max_results=int(os.getenv("TOOL_SEARCH_MAX_RESULTS", "5")),
         account_profiles=_account_profiles_from_env(),
         default_benchmark=os.getenv("DEFAULT_BENCHMARK", "").strip() or None,
+        homogeneous_groups=_homogeneous_groups_from_env(),
     )
 
 
@@ -305,6 +306,35 @@ def _json_object_from_env(name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{name} must be a JSON object keyed by account ID")
     return value
+
+
+def _homogeneous_groups_from_env() -> list[list[str]]:
+    """Parse HOMOGENEOUS_GROUPS: a JSON list of lists of DATASOURCE:SYMBOL."""
+    raw = os.getenv("HOMOGENEOUS_GROUPS", "").strip()
+    if not raw:
+        return []
+    groups = json.loads(raw)
+    if not isinstance(groups, list) or not all(
+        isinstance(group, list) and len(group) >= 2 for group in groups
+    ):
+        raise ValueError(
+            "HOMOGENEOUS_GROUPS must be a JSON list of lists of at least two "
+            "DATASOURCE:SYMBOL entries"
+        )
+    seen: set[str] = set()
+    for group in groups:
+        for security in group:
+            data_source, _, symbol = str(security).partition(":")
+            if not isinstance(security, str) or not data_source or not symbol:
+                raise ValueError(
+                    f"HOMOGENEOUS_GROUPS entry {security!r} is not DATASOURCE:SYMBOL"
+                )
+            if security in seen:
+                raise ValueError(
+                    f"HOMOGENEOUS_GROUPS lists {security!r} in more than one group"
+                )
+            seen.add(security)
+    return [list(group) for group in groups]
 
 
 def _account_profiles_from_env() -> dict[str, AccountProfile]:

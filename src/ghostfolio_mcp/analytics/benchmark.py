@@ -17,9 +17,14 @@ Conventions (``METHOD_VERSION`` changes whenever one of these does):
   period (at the benchmark close of that day), and every portfolio flow buys
   or sells benchmark units at the previous close, at the start of the day.
   ``benchmark_pnl`` is that holding's P&L, comparable in currency with the
-  portfolio's ``market_pnl_net``. Months are measured independently (each
-  starts from the portfolio's own opening value); the summary runs the
-  holding over the whole period.
+  portfolio's ``market_pnl_net``. Months are measured independently - each
+  restarts the holding from the portfolio's own opening value
+  (``config.benchmark_reset`` is ``"monthly"``) - while the summary runs one
+  holding over the whole period (``summary.benchmark_mode`` is
+  ``"continuous"``). The two differ: ``summary.benchmark_pnl`` is the
+  continuous holding's P&L, ``summary.benchmark_pnl_sum_of_months`` the sum of
+  the monthly ones, and the summary's ``benchmark_units_end`` the continuous
+  holding's units.
 - Cash drag: on each chart day, the cash held at the end of the previous day
   (chart ``totalCashInBaseCurrency``, which leaves out accounts excluded from
   analysis) times the benchmark's return that day, summed - what the cash
@@ -27,7 +32,9 @@ Conventions (``METHOD_VERSION`` changes whenever one of these does):
   positive when holding cash cost money against the benchmark. Interest is
   gross and attributed as in ``get_monthly_returns``, from accounts not
   excluded from analysis. Days before ``cash_known_from`` (the first balance
-  snapshot) are left out, since the chart shows no cash before then.
+  snapshot) are left out, since the chart shows no cash before then; then
+  ``cash.coverage_ratio`` (days counted / chart days) is below 1 and
+  ``flags.cash_coverage_partial`` is set.
 """
 
 import math
@@ -55,7 +62,7 @@ from ghostfolio_mcp.analytics.monthly_returns import Day
 from ghostfolio_mcp.analytics.monthly_returns import _twr
 from ghostfolio_mcp.analytics.monthly_returns import chart_window
 
-METHOD_VERSION = "benchmark/1"
+METHOD_VERSION = "benchmark/2"
 
 
 @dataclass(frozen=True)
@@ -182,6 +189,7 @@ def compare_with_benchmark(
             "cash_drag": money(earned - interest_paid),
             "days_counted": len(counted),
             "days_before_cash_history": len(days) - len(counted),
+            "coverage_ratio": ratio(len(counted) / len(days)) if days else None,
         }
 
     def measure(
@@ -191,6 +199,7 @@ def compare_with_benchmark(
         bench = _benchmark_return(days, prices)
         pnl = math.fsum(day.d_np for day in days)
         bench_pnl, units, negative = _same_flows(days, opening_value, prices)
+        cash = cash_drag(days, interest_paid)
         return {
             "twr": ratio(twr),
             "benchmark_return": ratio(bench),
@@ -202,14 +211,17 @@ def compare_with_benchmark(
             "pnl_difference": money(pnl - bench_pnl) if bench_pnl is not None else None,
             "net_flows": money(math.fsum(day.d_investment for day in days)),
             "benchmark_units_end": quantity(units) if units is not None else None,
-            "cash": cash_drag(days, interest_paid),
+            "cash": cash,
             "flags": {
                 "undefined_return_days": undefined,
                 "benchmark_units_negative": negative,
+                "cash_coverage_partial": cash["days_before_cash_history"] > 0,
             },
+            "_benchmark_pnl": bench_pnl,
         }
 
     month_rows = []
+    month_pnls: list[float | None] = []
     for month in window.months:
         days = [day for day in window.days if month_of(day.date) == month]
         covered_end = min(month_end(month), window.last_date)
@@ -217,11 +229,19 @@ def compare_with_benchmark(
         paid = math.fsum(interest.get(month, []))
         measured = measure(days, opening, paid)
         measured["flags"]["partial_month"] = covered_end < month_end(month)
+        month_pnls.append(measured.pop("_benchmark_pnl"))
         month_rows.append({"month": month, **measured})
 
     period_days = [day for day in window.days if month_of(day.date) in window.months]
     period_interest = math.fsum(v for m in window.months for v in interest.get(m, []))
     summary = measure(period_days, window.baseline.value, period_interest)
+    summary.pop("_benchmark_pnl")
+    summary["benchmark_mode"] = "continuous"
+    summary["benchmark_pnl_sum_of_months"] = (
+        money(math.fsum(p for p in month_pnls if p is not None))
+        if None not in month_pnls
+        else None
+    )
     summary["flags"]["partial_period"] = min(
         month_end(window.months[-1]), window.last_date
     ) < month_end(end_month)
@@ -230,6 +250,7 @@ def compare_with_benchmark(
         "method_version": METHOD_VERSION,
         "config": {
             "benchmark": config.benchmark,
+            "benchmark_reset": "monthly",
             "timezone": config.timezone,
             "chart_timezone": config.chart_timezone,
             "interest_attribution": config.interest_attribution,

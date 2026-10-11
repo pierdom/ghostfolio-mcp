@@ -12,6 +12,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 from zoneinfo import ZoneInfoNotFoundError
 
+import httpx2
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
@@ -19,8 +20,10 @@ from pydantic import Field
 from ghostfolio_mcp.analytics.audit import AccountInfo
 from ghostfolio_mcp.analytics.audit import AuditConfig
 from ghostfolio_mcp.analytics.audit import BalanceSnapshot
+from ghostfolio_mcp.analytics.audit import ExpectedDividend
 from ghostfolio_mcp.analytics.audit import audit_portfolio
 from ghostfolio_mcp.analytics.audit import parse_balance_snapshots
+from ghostfolio_mcp.analytics.audit import parse_expected_dividends
 from ghostfolio_mcp.analytics.benchmark import BenchmarkConfig
 from ghostfolio_mcp.analytics.benchmark import compare_with_benchmark
 from ghostfolio_mcp.analytics.cash_yield import CashYieldConfig
@@ -157,6 +160,30 @@ async def _fetch_prices(
         prices[key] = parse_market_data(asset.get("marketData") or [])
         isins[key] = (asset.get("assetProfile") or {}).get("isin") or None
     return prices, isins
+
+
+async def _fetch_expected_dividends(
+    client: Any, securities: list[tuple[str, str]]
+) -> tuple[list[ExpectedDividend], list[str]]:
+    """Distributions Ghostfolio's data provider reports for held positions.
+
+    Read from the route behind get_dividends_for_import. An asset whose
+    history cannot be read is listed instead of failing the whole audit.
+    """
+    expected: list[ExpectedDividend] = []
+    unavailable: list[str] = []
+    for data_source, symbol in sorted(set(securities)):
+        key = _security_key(data_source, symbol)
+        try:
+            response = await client.get(
+                f"import/dividends/{quote_path_segment(data_source)}"
+                f"/{quote_path_segment(symbol)}"
+            )
+        except httpx2.HTTPError:
+            unavailable.append(key)
+            continue
+        expected.extend(parse_expected_dividends(key, response.get("activities") or []))
+    return expected, unavailable
 
 
 async def _fetch_accounts(
@@ -299,9 +326,15 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
         findings with a severity (error, warn, info), the activities and dates
         involved and the evidence: trades booked a day off because of their
         timestamp, prices far from the close, duplicates, misdated or missing
-        interest, cash without interest, stale balances and prices, chart gaps
-        and invariant breaks, a legacy seed position, mixed timestamp styles,
-        and assets without ISIN. Nothing is corrected.
+        interest (interest_misdated when a double day sits next to an empty
+        one), interest rules contradicting the recorded payments, cash without
+        interest, stale balances and prices, distributions the data provider
+        reports on an ex-date with no DIVIDEND recorded (missing_distribution),
+        chart gaps and invariant breaks, a legacy seed position, mixed
+        timestamp styles, and assets without ISIN. Accounts excluded from
+        analysis are left out of the cash and interest checks. Trade-date
+        verdicts carry a confidence (high: conclusive or an exact close; low:
+        decided from intraday prices). Nothing is corrected.
 
         Args:
             timezone: IANA timezone activity dates are read in
@@ -326,6 +359,14 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
                     if a.type in ("BUY", "SELL")
                 ],
             )
+            expected_dividends, dividends_unavailable = await _fetch_expected_dividends(
+                client,
+                [
+                    (a.data_source, a.symbol)
+                    for a in activities
+                    if a.type in ("BUY", "SELL") and a.data_source != "MANUAL"
+                ],
+            )
             user = await client.get("user")
         rows = [
             r for r in parse_chart(performance.get("chart") or []) if r.date <= as_of
@@ -346,6 +387,8 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
                 no_interest_accounts=_no_interest_accounts(config),
             ),
             as_of,
+            expected_dividends=expected_dividends,
+            dividend_sources_unavailable=dividends_unavailable,
         )
 
     @mcp.tool(
@@ -515,6 +558,13 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
                 description="IANA timezone sale dates and tax years are read in",
             ),
         ] = "Europe/Madrid",
+        include_open_lot_detail: Annotated[
+            bool,
+            Field(
+                default=False,
+                description="List each open lot in FIFO order, not only totals",
+            ),
+        ] = False,
     ) -> dict[str, Any]:
         """
         Get realized gains per sale with FIFO lot matching, and per tax year.
@@ -525,35 +575,57 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
         Buy fees add to cost, sell fees reduce proceeds. A loss with the same
         asset bought within two months before or after and still held is
         flagged (two-month rule) with the affected quantity and loss; the
-        loss is not changed. Each sale lists the lots it consumed; open lots
-        are returned for reconciliation. Only base-currency trades are
-        supported.
+        loss is not changed; HOMOGENEOUS_GROUPS makes equivalent securities
+        count as one asset for that rule (lots are still matched per asset).
+        Each sale lists the lots it consumed. Open lots are returned per asset
+        with market_price (last stored close up to yesterday), market_value,
+        unrealized_gain and unrealized_pct; include_open_lot_detail adds each
+        lot (lot_detail), in FIFO order so the first is the next one sold,
+        with its fee-inclusive remaining cost and holding_days. Only
+        base-currency trades are supported.
 
         Args:
             year: Tax year to report sales for; omit for every sale
             timezone: IANA timezone sale dates and tax years are read in
+            include_open_lot_detail: List each open lot, not only totals
 
         Returns:
             Dictionary with method_version, config, year, sales, by_year and open_lots
         """
         _check_timezone(timezone)
+        excluded = frozenset(
+            account_id
+            for account_id, profile in config.account_profiles.items()
+            if profile.tax.excluded
+        )
         async with get_ghostfolio_client(config) as client:
             raw_activities = (await client.get("activities")).get("activities") or []
+            activities = parse_activities(raw_activities, timezone, CHART_TIMEZONE)
+            prices, _isins = await _fetch_prices(
+                client,
+                [
+                    (a.data_source, a.symbol)
+                    for a in activities
+                    if a.type in ("BUY", "SELL") and a.account_id not in excluded
+                ],
+            )
             user = await client.get("user")
         try:
             return compute_realized_gains(
-                parse_activities(raw_activities, timezone, CHART_TIMEZONE),
+                activities,
                 GainsConfig(
                     timezone=timezone,
                     base_currency=(user.get("settings") or {}).get("baseCurrency")
                     or "EUR",
-                    excluded_accounts=frozenset(
-                        account_id
-                        for account_id, profile in config.account_profiles.items()
-                        if profile.tax.excluded
+                    excluded_accounts=excluded,
+                    homogeneous_groups=tuple(
+                        tuple(group) for group in config.homogeneous_groups
                     ),
                 ),
                 year,
+                prices=prices,
+                as_of=_today(timezone) - timedelta(days=1),
+                include_open_lot_detail=include_open_lot_detail,
             )
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
@@ -715,6 +787,15 @@ def register_analytics_tools(mcp: FastMCP, config: GhostfolioConfig) -> None:
         actually earned (positive means holding cash cost money). The
         benchmark is any asset with stored prices; an accumulating fund's
         price return is its total return. Today's chart row is left out.
+
+        Each month restarts the benchmark holding from the portfolio's own
+        opening value (config.benchmark_reset = "monthly"); the summary runs
+        one continuous holding over the whole period (summary.benchmark_mode =
+        "continuous"). So summary.benchmark_pnl differs from the sum of the
+        months, given separately as summary.benchmark_pnl_sum_of_months, and
+        the summary's benchmark_units_end differs from the last month's. Days
+        before cash history begins are left out of cash drag; then
+        cash.coverage_ratio < 1 and flags.cash_coverage_partial is true.
 
         Args:
             start_month: First month to report, YYYY-MM

@@ -183,6 +183,10 @@ TOOL_SEARCH_MAX_RESULTS=5
 # accounts whose ACCOUNT_PROFILES entry has none.
 # INTEREST_RULES={"<account-id>": {"attribution": "previous_month", "expected": "monthly"}}
 
+# Equivalent securities for the two-month rule of get_realized_gains: a JSON
+# list of groups of DATASOURCE:SYMBOL counted as one asset there.
+# HOMOGENEOUS_GROUPS=[["YAHOO:VWCE.DE", "YAHOO:VWRL.AS"]]
+
 # Benchmark used when a tool call does not name one (DATASOURCE:SYMBOL).
 # Falls back to the benchmark selected in the Ghostfolio user settings.
 # DEFAULT_BENCHMARK=YAHOO:VWCE.DE
@@ -584,6 +588,8 @@ Only loopback hosts are accepted out of the box, so behind a reverse proxy the p
 
 ## Monthly Returns
 
+Changes to the analytics tools are listed by `method_version` in [ANALYTICS_CHANGELOG.md](ANALYTICS_CHANGELOG.md).
+
 `get_monthly_returns` computes monthly figures server-side from the daily performance chart and the activity list, so the same Ghostfolio data always gives byte-identical output. The calculation lives in `ghostfolio_mcp.analytics.monthly_returns` (pure, no I/O), and every response carries `method_version` plus the window, timezone and rules it used.
 
 Inputs: `start_month`, `end_month` (`YYYY-MM`), `timezone` (default `Europe/Madrid`) and `interest_attribution` (`payment_date` or `accrual`).
@@ -629,11 +635,15 @@ The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees + interest_fees = 
 
 | Check | Severity | Meaning |
 | --- | --- | --- |
-| `trade_date_mismatch` | warn / info | A timestamp between local and UTC midnight has two candidate dates; the stored close decides which one the price belongs to. A day counts as a trading day only if its close is neither carried forward nor a repeat of the day before (Ghostfolio fills weekends with Friday's close). Trades of one account sharing a timestamp are judged together, as one batch. `booked_day_before_trade` (warn): Ghostfolio values the trade a day early. `local_date_after_trade` (info): the local date, used for monthly bucketing, is a day late. `ambiguous` (info): the price cannot tell. |
+| `trade_date_mismatch` | warn / info | A timestamp between local and UTC midnight has two candidate dates; the stored close decides which one the price belongs to. A day counts as a trading day only if its close is neither carried forward nor a repeat of the day before (Ghostfolio fills weekends with Friday's close). Trades of one account sharing a timestamp are judged together, as one batch. `booked_day_before_trade` (warn): Ghostfolio values the trade a day early. `local_date_after_trade` (info): the local date, used for monthly bucketing, is a day late. `ambiguous` (info): the price cannot tell. `evidence.confidence` is `high` when only one of the two days traded or the price is that day's close (within 0.05%), `low` when decided from intraday prices - which needs the price to be at least 0.5% nearer one close and the other day at least twice as far. |
 | `price_far_from_close` | warn | The price is more than 5% from the close on the day Ghostfolio books the trade |
 | `duplicate_activity` | error | Same account, type, asset, local date, quantity, price and fee |
-| `interest_day_conflict` | warn | A daily payer with two payments on one day, usually next to a day with none |
-| `missing_interest_day` / `missing_interest_month` / `missing_interest_quarter` | warn | A gap in a daily, monthly or quarterly payer's interest (`interest.expected` in `ACCOUNT_PROFILES`). Daily cadence is checked per kind of interest, and only for a kind paid on at least half the days of its span; yesterday is allowed to be missing, since daily payments are often recorded the day after |
+| `interest_misdated` | warn | A daily payer with two payments on one day next to a day with none: one finding with both dates, both payments and which one to move (`evidence.suggestion`) |
+| `interest_day_conflict` | warn | A daily payer with two payments on one day and no empty day next to it |
+| `missing_interest_day` / `missing_interest_month` / `missing_interest_quarter` | warn | A gap in a daily, monthly or quarterly payer's interest (`interest.expected` in `ACCOUNT_PROFILES`). Daily cadence is checked per kind of interest, and only for a kind paid on at least half the days of its span; the last two days before `as_of` are allowed to be missing, since daily payments are often imported later |
+| `interest_rule_contradiction` | info | An account configured with `interest.expected: "none"` that has interest payments, or one configured daily/monthly/quarterly with none at all. Accounts without an interest setting are not judged |
+| `missing_distribution` | warn | The data provider reports a distribution on an ex-date while the account held the asset (the data behind `get_dividends_for_import`), and no DIVIDEND is recorded from 3 days before to 30 days after; evidence has shares, the amount per share and the expected gross |
+| `dividend_data_unavailable` | info | Assets whose dividend history could not be read, so distributions were not checked |
 | `cash_without_interest` | info | Cash above 100 with no interest in 190 days; skipped for accounts whose profile sets `interest.expected` to `"none"` explicitly |
 | `stale_balance` | info | Cash above 100 and no balance snapshot in 45 days |
 | `stale_price` | warn | A held asset whose last real (not carried-forward) close is over 5 days old |
@@ -641,6 +651,8 @@ The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees + interest_fees = 
 | `legacy_seed_position` | info | A first buy more than 180 days before the next and under 1% of all buys |
 | `mixed_timestamp_styles` | info | One account records the same kind of activity at UTC midnight, local midnight and intraday times |
 | `missing_isin`, `unsupported_activity_type`, `non_base_currency` | info | Data the analytics tools cannot fully interpret |
+
+Accounts excluded from analysis (`EXCLUDE_FROM_ANALYSIS`) are left out of the cash and interest checks (`cash_without_interest`, `stale_balance`, the `missing_interest_*` checks, `interest_misdated`, `interest_rule_contradiction`). They stay in the data-integrity checks - duplicates, trade dates, prices, distributions, timestamp styles, ISIN - since their activities still feed `get_realized_gains` and `get_modelo720_inputs`.
 
 ## Cash Yield
 
@@ -671,7 +683,8 @@ Warnings never change the status: a local-midnight timestamp (Ghostfolio books i
 - Lots are pooled per asset (`dataSource:symbol`) across all accounts. Accounts with `tax.excluded` in `ACCOUNT_PROFILES` (e.g. a pension plan) are left out.
 - Activities are processed in timestamp order (a BUY first on a tie). Buy fees add to cost and sell fees reduce proceeds; a partly used lot gives up cost in proportion to quantity.
 - Dates and tax years are the activity's date in `timezone`.
-- Two-month rule: a sale at a loss is flagged when the same asset was bought within two calendar months before or after and those shares were still held after the sale. The flag gives the affected quantity, its share and the affected loss; the loss is reported unchanged, and `by_year` totals the flagged part in `losses_flagged_two_month_rule`.
+- Two-month rule: a sale at a loss is flagged when the same asset was bought within two calendar months before or after and those shares were still held after the sale. The flag gives the affected quantity, its share and the affected loss; the loss is reported unchanged, and `by_year` totals the flagged part in `losses_flagged_two_month_rule`. `HOMOGENEOUS_GROUPS` makes equivalent securities (e.g. two listings of one fund) count as one asset for this rule; lots are still matched per asset.
+- Open lots are valued at the last stored close up to yesterday (`valuation_date`): `market_price`, `price_date`, `market_value`, `unrealized_gain` and `unrealized_pct`, with cost including buy fees. `include_open_lot_detail: true` adds `lot_detail`: each open lot in FIFO order (the first is the next one sold) with its buy activity, date and account, remaining quantity, fee-inclusive cost, `holding_days` and the same valuation.
 - A sale larger than the shares held reports the uncovered quantity and no gain.
 - Only base-currency trades are supported; anything else is refused.
 
@@ -699,7 +712,7 @@ Assets are identified by `dataSource:symbol`, so the same security bought under 
 | `cash.benchmark_opportunity` | Σ previous day's cash × the benchmark's return that day: what the cash would have earned in the benchmark |
 | `cash.cash_drag` | `benchmark_opportunity - interest`; positive when holding cash cost money against the benchmark |
 
-Months are measured independently; the summary runs one benchmark holding over the whole period. Cash comes from the chart (`totalCashInBaseCurrency`, which leaves out accounts excluded from analysis), and interest - gross, attributed as in `get_monthly_returns` - from the same accounts. Days before the first balance snapshot (`cash_known_from`) are left out of cash drag, since the chart shows no cash before then.
+Each month restarts the benchmark holding from the portfolio's own opening value (`config.benchmark_reset: "monthly"`), while the summary runs one holding over the whole period (`summary.benchmark_mode: "continuous"`). The two differ by construction: `summary.benchmark_pnl` is the continuous holding's P&L and `summary.benchmark_pnl_sum_of_months` the sum of the monthly ones; likewise the summary's `benchmark_units_end` is the continuous holding's. Cash comes from the chart (`totalCashInBaseCurrency`, which leaves out accounts excluded from analysis), and interest - gross, attributed as in `get_monthly_returns` - from the same accounts. Days before the first balance snapshot (`cash_known_from`) are left out of cash drag, since the chart shows no cash before then; `cash.coverage_ratio` (days counted / chart days) and `flags.cash_coverage_partial` show it, per month and in the summary.
 
 ## Data Sources
 

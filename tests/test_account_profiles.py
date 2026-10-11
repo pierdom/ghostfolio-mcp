@@ -11,7 +11,12 @@ from ghostfolio_mcp.models import TaxProfile
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    for name in ("ACCOUNT_PROFILES", "INTEREST_RULES", "DEFAULT_BENCHMARK"):
+    for name in (
+        "ACCOUNT_PROFILES",
+        "INTEREST_RULES",
+        "DEFAULT_BENCHMARK",
+        "HOMOGENEOUS_GROUPS",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -99,3 +104,30 @@ def test_default_benchmark_is_read(monkeypatch):
     monkeypatch.setenv("DEFAULT_BENCHMARK", " YAHOO:VWCE.DE ")
 
     assert get_ghostfolio_config_from_env().default_benchmark == "YAHOO:VWCE.DE"
+
+
+def test_homogeneous_groups_are_read(monkeypatch):
+    monkeypatch.setenv(
+        "HOMOGENEOUS_GROUPS",
+        '[["YAHOO:VWCE.DE", "YAHOO:VWRL.AS"], ["YAHOO:A", "YAHOO:B"]]',
+    )
+
+    assert get_ghostfolio_config_from_env().homogeneous_groups == [
+        ["YAHOO:VWCE.DE", "YAHOO:VWRL.AS"],
+        ["YAHOO:A", "YAHOO:B"],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ('[["YAHOO:A"]]', "at least two"),
+        ('[["YAHOO:A", "B"]]', "not DATASOURCE:SYMBOL"),
+        ('[["YAHOO:A", "YAHOO:B"], ["YAHOO:B", "YAHOO:C"]]', "more than one group"),
+    ],
+)
+def test_invalid_homogeneous_groups_are_rejected(monkeypatch, value, message):
+    monkeypatch.setenv("HOMOGENEOUS_GROUPS", value)
+
+    with pytest.raises(ValueError, match=message):
+        get_ghostfolio_config_from_env()

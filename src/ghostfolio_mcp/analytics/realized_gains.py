@@ -26,18 +26,21 @@ Conventions (``METHOD_VERSION`` changes whenever one of these does):
 import math
 from collections import defaultdict
 from collections.abc import Collection
+from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import date
 from typing import Any
 
 from ghostfolio_mcp.analytics.common import Activity
+from ghostfolio_mcp.analytics.common import PricePoint
 from ghostfolio_mcp.analytics.common import money
 from ghostfolio_mcp.analytics.common import parse_timestamp
+from ghostfolio_mcp.analytics.common import price_on_or_before
 from ghostfolio_mcp.analytics.common import quantity
 from ghostfolio_mcp.analytics.common import ratio
 
-METHOD_VERSION = "realized-gains/1"
+METHOD_VERSION = "realized-gains/2"
 
 # A lot below this many shares is treated as used up.
 _EPSILON = 1e-9
@@ -49,6 +52,9 @@ class GainsConfig:
     base_currency: str = "EUR"
     excluded_accounts: Collection[str] = field(default_factory=frozenset)
     wash_sale_months: int = 2
+    # Groups of DATASOURCE:SYMBOL counted as one asset by the two-month rule
+    # (equivalent securities). Lots are still matched per asset.
+    homogeneous_groups: Collection[Collection[str]] = field(default_factory=tuple)
 
 
 @dataclass
@@ -76,15 +82,52 @@ def _order(activity: Activity) -> tuple:
     )
 
 
+def _group_of(config: GainsConfig) -> dict[str, tuple[str, ...]]:
+    """Each grouped asset's group, members sorted; ungrouped assets are absent."""
+    groups: dict[str, tuple[str, ...]] = {}
+    for group in config.homogeneous_groups:
+        members = tuple(sorted(set(group)))
+        for security in members:
+            groups[security] = members
+    return groups
+
+
+def _valuation(
+    quantity_held: float, cost: float, point: PricePoint | None
+) -> dict[str, Any]:
+    if point is None:
+        return {
+            "market_price": None,
+            "price_date": None,
+            "market_value": None,
+            "unrealized_gain": None,
+            "unrealized_pct": None,
+        }
+    value = quantity_held * point.price
+    gain = value - cost
+    return {
+        "market_price": point.price,
+        "price_date": point.date.isoformat(),
+        "market_value": money(value),
+        "unrealized_gain": money(gain),
+        "unrealized_pct": ratio(gain / cost) if cost > 0 else None,
+    }
+
+
 def compute_realized_gains(
     activities: list[Activity],
     config: GainsConfig,
     year: int | None = None,
+    prices: Mapping[str, list[PricePoint]] | None = None,
+    as_of: date | None = None,
+    include_open_lot_detail: bool = False,
 ) -> dict[str, Any]:
     """FIFO gains for every sale, or for the sales of one tax year.
 
     Lots are always built from the whole history; ``year`` only selects which
-    sales are reported.
+    sales are reported. Open lots are valued at the last stored close on or
+    before ``as_of`` when ``prices`` are given; ``include_open_lot_detail``
+    lists them one by one, in FIFO order (the first is the next one sold).
 
     Raises:
         ValueError: When a BUY or SELL is not in the base currency.
@@ -103,6 +146,7 @@ def compute_realized_gains(
             f"(first: {foreign[0]}); currency conversion is not supported"
         )
     trades.sort(key=_order)
+    groups = _group_of(config)
 
     lots: dict[str, list[_Lot]] = defaultdict(list)
     buys_by_security: dict[str, list[Activity]] = defaultdict(list)
@@ -148,14 +192,18 @@ def compute_realized_gains(
             for lot, take, _ in consumed:
                 consumed_by_buy[lot.buy.id] += take
             window = []
-            for buy in buys_by_security[trade.security]:
+            members = groups.get(trade.security, (trade.security,))
+            candidates = sorted(
+                (b for s in members for b in buys_by_security[s]), key=_order
+            )
+            for buy in candidates:
                 if buy.id == trade.id or not start <= buy.local_date <= end:
                     continue
                 if _order(buy) < _order(trade):
                     # Bought before: only shares this sale did not use up
                     # still count as held after it.
                     lot = next(
-                        (lot for lot in lots[trade.security] if lot.buy is buy), None
+                        (lot for lot in lots[buy.security] if lot.buy is buy), None
                     )
                     held = lot.remaining if lot else 0.0
                 else:
@@ -175,6 +223,7 @@ def compute_realized_gains(
                             "activity_id": buy.id,
                             "date": buy.local_date.isoformat(),
                             "account_id": buy.account_id,
+                            "security": buy.security,
                             "quantity_held": quantity(held),
                         }
                         for buy, held in window
@@ -242,16 +291,42 @@ def compute_realized_gains(
         remaining = [lot for lot in lots[security] if lot.remaining > _EPSILON]
         if not remaining:
             continue
-        open_lots.append(
-            {
-                "security": security,
-                "quantity": quantity(math.fsum(lot.remaining for lot in remaining)),
-                "cost": money(
-                    math.fsum(lot.remaining * lot.cost_per_share for lot in remaining)
-                ),
-                "lots": len(remaining),
-            }
+        point = (
+            price_on_or_before(prices.get(security, []), as_of)
+            if prices is not None and as_of is not None
+            else None
         )
+        held = math.fsum(lot.remaining for lot in remaining)
+        cost = math.fsum(lot.remaining * lot.cost_per_share for lot in remaining)
+        row: dict[str, Any] = {
+            "security": security,
+            "quantity": quantity(held),
+            "cost": money(cost),
+            "lots": len(remaining),
+            **_valuation(held, cost, point),
+        }
+        if include_open_lot_detail:
+            row["lot_detail"] = [
+                {
+                    "buy_activity_id": lot.buy.id,
+                    "buy_date": lot.buy.local_date.isoformat(),
+                    "account_id": lot.buy.account_id,
+                    "quantity": quantity(lot.remaining),
+                    "cost": money(lot.remaining * lot.cost_per_share),
+                    "holding_days": (as_of - lot.buy.local_date).days
+                    if as_of is not None
+                    else None,
+                    **{
+                        k: v
+                        for k, v in _valuation(
+                            lot.remaining, lot.remaining * lot.cost_per_share, point
+                        ).items()
+                        if k not in ("market_price", "price_date")
+                    },
+                }
+                for lot in remaining
+            ]
+        open_lots.append(row)
 
     return {
         "method_version": METHOD_VERSION,
@@ -261,7 +336,12 @@ def compute_realized_gains(
             "excluded_accounts": sorted(config.excluded_accounts),
             "wash_sale_months": config.wash_sale_months,
             "lot_matching": "fifo_per_asset_across_accounts",
+            "homogeneous_groups": sorted(
+                sorted(set(group)) for group in config.homogeneous_groups
+            ),
+            "include_open_lot_detail": include_open_lot_detail,
         },
+        "valuation_date": as_of.isoformat() if as_of is not None else None,
         "year": year,
         "sales": [
             {k: v for k, v in sale.items() if not k.startswith("_")}
