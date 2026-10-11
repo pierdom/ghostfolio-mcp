@@ -106,7 +106,8 @@ async def test_audit_reads_only_and_reports_findings(fake_ghostfolio):
     found = {(f["check"], f["severity"]) for f in result["findings"]}
     assert ("trade_date_mismatch", "warn") in found
     [missing] = [f for f in result["findings"] if f["check"] == "missing_interest_day"]
-    assert missing["dates"] == ["2026-04-05", "2026-04-10"]
+    # Apr 10 is as_of: within the one-day grace for daily payments.
+    assert missing["dates"] == ["2026-04-05"]
     assert ("missing_isin", "info") in found
     cash = [f for f in result["findings"] if f["check"] == "cash_without_interest"]
     assert [f["account_id"] for f in cash] == ["acc-b"]

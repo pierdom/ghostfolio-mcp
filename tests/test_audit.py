@@ -619,3 +619,15 @@ def test_quarterly_payer_missing_a_quarter():
 
     # Q4 is still running on Oct 15, so only Q2 is missing.
     assert finding["evidence"] == {"quarters": ["2026-Q2"]}
+
+
+def test_yesterdays_daily_payment_may_still_be_missing():
+    # Paid through Aug 29; AS_OF is Aug 31. Aug 31 is within the one-day
+    # grace, Aug 30 is not.
+    result = run(
+        daily_interest("2026-08-01", "2026-08-29"),
+        interest_rules={"acc-a": InterestRule(expected="daily")},
+    )
+    [missing] = checks(result, "missing_interest_day")
+
+    assert missing["dates"] == ["2026-08-30"]

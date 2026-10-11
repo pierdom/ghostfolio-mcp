@@ -633,7 +633,7 @@ The invariant checked every day is `ΔNP - (ΔV - ΔI) + fees + interest_fees = 
 | `price_far_from_close` | warn | The price is more than 5% from the close on the day Ghostfolio books the trade |
 | `duplicate_activity` | error | Same account, type, asset, local date, quantity, price and fee |
 | `interest_day_conflict` | warn | A daily payer with two payments on one day, usually next to a day with none |
-| `missing_interest_day` / `missing_interest_month` / `missing_interest_quarter` | warn | A gap in a daily, monthly or quarterly payer's interest (`interest.expected` in `ACCOUNT_PROFILES`). Daily cadence is checked per kind of interest, and only for a kind paid on at least half the days of its span |
+| `missing_interest_day` / `missing_interest_month` / `missing_interest_quarter` | warn | A gap in a daily, monthly or quarterly payer's interest (`interest.expected` in `ACCOUNT_PROFILES`). Daily cadence is checked per kind of interest, and only for a kind paid on at least half the days of its span; yesterday is allowed to be missing, since daily payments are often recorded the day after |
 | `cash_without_interest` | info | Cash above 100 with no interest in 190 days; skipped for accounts whose profile sets `interest.expected` to `"none"` explicitly |
 | `stale_balance` | info | Cash above 100 and no balance snapshot in 45 days |
 | `stale_price` | warn | A held asset whose last real (not carried-forward) close is over 5 days old |

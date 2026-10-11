@@ -30,7 +30,8 @@ Checks (``METHOD_VERSION`` changes whenever one is added or its rule changes):
   ``missing_interest_quarter`` (warn) - a daily, monthly or quarterly payer
   (``InterestRule.expected``) with a day, month or calendar quarter without
   interest between its first payment and the last complete period before
-  ``as_of``. Daily cadence is judged
+  ``as_of``. Daily payments get ``daily_interest_grace_days`` (1) before a
+  day counts as missing, since they are often recorded the day after. Daily cadence is judged
   per kind of interest (asset): only a kind paid on at least half the days of
   its span counts as daily, so occasional lending income is not checked.
 - ``cash_without_interest`` (info) - an account holding cash that paid no
@@ -80,7 +81,7 @@ from ghostfolio_mcp.analytics.common import shift_month
 from ghostfolio_mcp.analytics.monthly_returns import ReturnsConfig
 from ghostfolio_mcp.analytics.monthly_returns import compute_monthly_returns
 
-METHOD_VERSION = "audit/3"
+METHOD_VERSION = "audit/4"
 
 SUPPORTED_ACTIVITY_TYPES = frozenset({"BUY", "SELL", "INTEREST"})
 
@@ -120,6 +121,9 @@ class AuditConfig:
     trade_date_exact_gap: float = 0.0005
     price_far_ratio: float = 0.05
     interest_window_days: int = 190
+    # Days before as_of a daily payment may still be missing: payments are
+    # often recorded the next day.
+    daily_interest_grace_days: int = 1
     cash_threshold: float = 100.0
     stale_balance_days: int = 45
     stale_price_days: int = 5
@@ -465,7 +469,13 @@ def _check_interest(
             continue
         name = paid[0].account_name
         if rule.expected == "daily":
-            findings.extend(_check_daily_interest(paid, (account_id, name), as_of))
+            findings.extend(
+                _check_daily_interest(
+                    paid,
+                    (account_id, name),
+                    as_of - timedelta(days=config.daily_interest_grace_days),
+                )
+            )
         elif rule.expected == "monthly":
             paid_months = {month_of(a.local_date) for a in paid}
             last_complete = shift_month(month_of(as_of), -1)
@@ -846,6 +856,7 @@ def audit_portfolio(
                 "trade_date_exact_gap": config.trade_date_exact_gap,
                 "price_far_ratio": config.price_far_ratio,
                 "interest_window_days": config.interest_window_days,
+                "daily_interest_grace_days": config.daily_interest_grace_days,
                 "cash_threshold": config.cash_threshold,
                 "stale_balance_days": config.stale_balance_days,
                 "stale_price_days": config.stale_price_days,
