@@ -136,7 +136,10 @@ def parse_activities(
     for raw in raw_activities:
         timestamp = parse_timestamp(raw["date"])
         account = raw.get("account") or {}
-        profile = raw.get("SymbolProfile") or {}
+        # Ghostfolio's activities carry the asset as `assetProfile` (it was `SymbolProfile`
+        # before): read either, or the symbol is empty and nothing matches (25 Nov 2026:
+        # preview_import called every activity new, and realized gains had no symbol to look up).
+        profile = raw.get("assetProfile") or raw.get("SymbolProfile") or {}
         activities.append(
             Activity(
                 id=str(raw["id"]),

@@ -66,3 +66,34 @@ async def test_malformed_payload_is_refused_before_any_request(fake_ghostfolio, 
     with pytest.raises(ToolError, match="activities"):
         await call_tool("preview_import", {"data": data})
     assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_activities_that_name_their_asset_assetprofile_are_matched_too(
+    fake_ghostfolio,
+):
+    """25 Nov 2026: Ghostfolio's activities carry `assetProfile` (once `SymbolProfile`); reading
+    only the old key left every symbol empty, so every proposed activity was called new."""
+    renamed = {
+        path: (
+            {
+                **body,
+                "activities": [
+                    {
+                        **{k: v for k, v in a.items() if k != "SymbolProfile"},
+                        "assetProfile": a["SymbolProfile"],
+                    }
+                    for a in body["activities"]
+                ],
+            }
+            if "activities" in body
+            else body
+        )
+        for path, body in RESPONSES.items()
+    }
+    call_tool, _ = fake_ghostfolio(renamed)
+
+    result = await call_tool("preview_import", {"data": PAYLOAD})
+
+    assert result["items"][0]["status"] == "duplicate"
+    assert result["items"][0]["matches"] == ["e1"]
